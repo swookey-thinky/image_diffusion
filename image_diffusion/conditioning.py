@@ -86,6 +86,17 @@ class UnconditionalTextPromptsAdapter(torch.nn.Module):
         return new_context
 
 
+class UnconditionalClassesAdapter(torch.nn.Module):
+    def __init__(self, num_classes):
+        self._num_classes = num_classes
+
+    def forward(self, context: Dict):
+        new_context = context.copy()
+        classes = context["classes"]
+        new_context["classes"] = torch.zeros_like(classes) + self._num_classes
+        return new_context
+
+
 class TextPromptsPreprocessor(torch.nn.Module):
     def __init__(self, text_context_size: int, **kwargs):
         super().__init__()
