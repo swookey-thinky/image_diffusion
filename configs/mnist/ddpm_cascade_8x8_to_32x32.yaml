@@ -1,0 +1,17 @@
+diffusion_cascade:
+  cascade_layer_1:
+    # Base DDPM layer at 8x8 resolution.
+    config: "configs/mnist/ddpm_8x8_epsilon.yaml"
+  cascade_layer_2:
+    # An 8x8 -> 32x32 super resolution model.
+    config: "configs/mnist/ddpm_sr3.yaml"
+
+# Describes the dataset used in training.
+data:
+  # Spatial width/height of the data input to the model.
+  image_size: 32
+  # Number of channels in the input data
+  num_channels: 1
+  # The number of classes in the dataset
+  num_classes: 10
+
