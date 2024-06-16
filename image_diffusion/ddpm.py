@@ -273,11 +273,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             guidance_fn=guidance_fn,
             classifier_free_guidance=classifier_free_guidance,
         )
-
-        if self._is_class_conditional:
-            latents, _ = latent_samples
-        else:
-            latents = latent_samples
+        latents = latent_samples
 
         # Decode the samples from the latent space
         samples = unnormalize_to_zero_to_one(latents)
@@ -313,6 +309,9 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         summary_context = {
             "timestep": torch.randint(0, 10, size=(batch_size,)),
             "text_prompts": [""] * batch_size,
+            "classes": torch.randint(
+                0, self._config.data.num_classes, size=(batch_size,)
+            ),
         }
 
         if "super_resolution" in self._config:
@@ -347,9 +346,16 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         )
 
     def configure_optimizers(self, learning_rate: float) -> List[torch.optim.Optimizer]:
-        return [
-            torch.optim.Adam(self.parameters(), lr=learning_rate, betas=(0.9, 0.99))
-        ]
+        if "optimizer" in self._config:
+            return [
+                instantiate_partial_from_config(self._config.optimizer.to_dict())(
+                    self.parameters()
+                )
+            ]
+        else:
+            return [
+                torch.optim.Adam(self.parameters(), lr=learning_rate, betas=(0.9, 0.99))
+            ]
 
     def _pred_epsilon(
         self,

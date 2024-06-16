@@ -88,6 +88,7 @@ class UnconditionalTextPromptsAdapter(torch.nn.Module):
 
 class UnconditionalClassesAdapter(torch.nn.Module):
     def __init__(self, num_classes):
+        super().__init__()
         self._num_classes = num_classes
 
     def forward(self, context: Dict):
