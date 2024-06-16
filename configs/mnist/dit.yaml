@@ -64,7 +64,7 @@ diffusion:
       # Hidden size of the transformer
       hidden_size: 384
       # Transformer depth (number of transformer blocks)
-      depth: 6
+      depth: 12
       # Number of attention heads in each transformer block
       num_heads: 6
       # Multiplier for internal dimensions of MLP in each transformer block,
@@ -120,9 +120,14 @@ diffusion:
 # Describes the dataset used in training.
 data:
   # Spatial width/height of the data input to the model.
-  image_size: 8
+  image_size: 32
   # Number of channels in the input data
   num_channels: 1
   # The number of classes in the dataset
   num_classes: 10
-
+# Optional optimizer specification
+optimizer:
+  target: torch.optim.Adam
+  params:
+    lr: .0002
+    betas: [0.9, 0.99]
