@@ -1,5 +1,6 @@
 # Epsilon parameterized text conditional DDPM model, no learned sigma,
-# operating at 8x8 resolution.
+# operating at 8x8 resolution, using CLIP text embeddings for conditional
+# control.
 diffusion:
   # Sampling section determines the size of the sampled output
   # from the model, and defines the sampling method used
@@ -24,12 +25,10 @@ diffusion:
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context
       # into a batch of text tokens of shape (B, text_context_size)
-      - target: image_diffusion.conditioning.T5TextPromptsPreprocessor
+      - target: image_diffusion.conditioning.CLIPTextPromptsPreprocessor
         params:
-          # The max length of the text token sequence
-          max_length: 77
-          # The name of the T5 text model to use
-          model_name: "google/t5-v1_1-small"
+          # The CLIP text embedder has a maximum token sequence length of 77.
+          text_sequence_length: 77
   # A preprocessor for input to the model.
   input_preprocessing:
     target: image_diffusion.conditioning.IgnoreInputPreprocessor
@@ -49,10 +48,6 @@ diffusion:
     unconditional_context:
       target: image_diffusion.conditioning.UnconditionalTextPromptsAdapter
       params: {}
-  dynamic_thresholding:
-    enable: True
-    p: 0.99
-    c: 1.7
   # Defines the score network for predicting the noise parameter
   score_network:
     target: image_diffusion.score_networks.unet.Unet
@@ -105,8 +100,16 @@ diffusion:
       conditioning:
         # The signals (keys in the dictionary) that are available in the conditioning
         # context.
-        signals: ["timestep", "text_tokens"]
+        signals: ["text_tokens", "timestep"]
         projections:
+          # A projection to apply to the text tokens in the conditioning context.
+          text_tokens:
+            # Defines an embedding which goes from text tokens at the given
+            # sequence size to text token embeddings.
+            target: image_diffusion.layers.embedding.CLIPTextTokenProjection
+            params:
+              # The CLIP embedding pretrained model has a sequence length of 77.
+              text_sequence_length: 77
           # A projection to apply to the integer timesteps.
           timestep:
             # Defines a projection incorporating the sinusoidal position embedding.
@@ -115,47 +118,33 @@ diffusion:
             params:
               num_features: 128
               time_embedding_mult: 4
-          # A projection to apply to the text tokens in the conditioning context.
-          text_tokens:
-            # Defines an embedding which goes from text tokens at the given
-            # vocabulary size to text token embeddings.
-            target: image_diffusion.layers.embedding.T5TextTokensToEmbedding
-            params:
-              model_name: "google/t5-v1_1-small"
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
-          # Projects the text tokens into text embeddings using the projection
-          # defined for "text_tokens"
-          - target: image_diffusion.conditioning.TextTokenProjectionAdapter
-            params: {}
-          # Adds the text embeddings to the timestep projection using a pooled embedding
-          # vector with Layer Norm
-          - target: image_diffusion.layers.embedding.PooledTextEmbeddingsToTimestep
-            params:
-              text_embedding_dim: 512
-              time_embedding_dim: 512
-              attention_pooling_heads: 1
-        # The context transformer to use at each attention layer. This transforms
-        # the context with a different set of parameters at each attention layer.
+          # Projects the text tokens into text embeddings. This simply applies
+          # the projection defined above for "text_tokens", and stores the result
+          # in the "text_embeddings" key of the context.
+          target: image_diffusion.conditioning.TextTokenProjectionAdapter
+          params: {}
         context_transformer_layer:
-          target: image_diffusion.layers.attention.SpatialCrossAttention
+          target: image_diffusion.layers.transformer.SpatialTransformer
           params:
-            # The dimensionality of the context signal coming in.
-            # -1 signifies no context coming in, and this defaults to Multi-Head
-            # self attention.
-            context_dim: 512
-            # The number of heads in the attention layer.
-            heads: 1
-            # The dimensionality of each attention head.
-            dim_head: 64
-            # Dropout probability to use in training.
+            # The number of layers in the transformer
+            num_layers: 1
+            # The number of attention heads in each layer.
+            attention_heads: 1
+            # The number of channels in the attention heads.
+            attention_channels: 64
+            # The size of the text/image/etc context dimension, for conditioning
+            # the image generation. The CLIP text embedder above generates
+            # Embeddings of shape (B, sequence length, context dim)
+            context_dim: 768
+            # Dropout factor for training.
             dropout: 0.1
             # The context adapter for the conditioning signal
             context_adapter:
               target: image_diffusion.conditioning.TextEmbeddingsAdapter
-              params:
-                swap_context_channels: True
+              params: {}
 
 # Describes the dataset used in training.
 data:

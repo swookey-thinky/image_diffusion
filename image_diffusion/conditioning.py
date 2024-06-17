@@ -15,6 +15,7 @@ image_imbeddings
 
 from abc import abstractmethod
 import torch
+from transformers import T5Tokenizer
 from typing import Dict, List
 
 from image_diffusion.layers.clip import FrozenCLIPTextTokenizer
@@ -155,32 +156,27 @@ class T5TextPromptsPreprocessor(torch.nn.Module):
         super().__init__()
         self._max_length = max_length
 
-        from transformers import T5Tokenizer
-
-        self._tokenizer = T5Tokenizer.from_pretrained(model_name)
+        self._tokenizer = T5Tokenizer.from_pretrained(model_name, legacy=False)
 
     def forward(self, context: Dict, device, **kwargs):
         if "text_prompts" in context:
             prompts = context["text_prompts"]
             with torch.no_grad():
-                tokens_and_masks = self._tokenizer(
+                tokens_dict = self._tokenizer(
                     prompts,
                     max_length=self._max_length,
                     padding="max_length",
                     truncation=True,
-                    return_attention_mask=True,
-                    add_special_tokens=True,
+                    return_overflowing_tokens=False,
                     return_tensors="pt",
                 )
 
             # Add the text tokens to the context
             if "text_tokens" not in context:
-                context["text_tokens"] = (
-                    tokens_and_masks["input_ids"].detach().to(device)
-                )
-                context["text_tokens_attention_mask"] = (
-                    tokens_and_masks["attention_mask"].detach().to(device)
-                )
+                text_inputs_on_device = {}
+                for k, v in tokens_dict.items():
+                    text_inputs_on_device[k] = v.detach().to(device)
+                context["text_tokens"] = text_inputs_on_device
         return context
 
 

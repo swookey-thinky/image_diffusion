@@ -155,12 +155,11 @@ class T5TextTokensToEmbedding(torch.nn.Module):
         self._text_encoder = freeze(T5EncoderModel.from_pretrained(model_name))
 
     def forward(self, tokens, context: Dict, **kwargs):
+        # Tokens come in as a dictionary from the CLIP text encoder
+        assert "input_ids" in tokens and "attention_mask" in tokens
         with torch.no_grad():
-            text_encoder_embeddings = self._text_encoder(
-                input_ids=tokens,
-                attention_mask=context["text_tokens_attention_mask"],
-            )["last_hidden_state"].detach()
-            return text_encoder_embeddings
+            embedding_dict = self._text_encoder(**tokens)
+        return embedding_dict["last_hidden_state"].detach()
 
 
 class DiTTimestepEmbedding(torch.nn.Module):
