@@ -39,13 +39,14 @@ class SpatialCrossAttention(ContextBlock):
         dropout=0.0,
         pre_layer_norm: bool = False,
         post_layer_norm: bool = False,
+        context_layer_norm: bool = False,
         context_adapter: Dict = {},
     ):
+        """Initialize a new instance of SpatialCrossAttention."""
         super().__init__()
 
         if context_dim == -1:
             context_dim = None
-
         self._channels = in_channels
         if dim_head == -1:
             self._num_heads = heads
@@ -62,6 +63,11 @@ class SpatialCrossAttention(ContextBlock):
             self._final_norm = ChanLayerNorm(in_channels)
         else:
             self._final_norm = torch.nn.Identity()
+
+        if context_layer_norm:
+            self._context_layer_norm = ChanLayerNorm(context_dim, dim=-2)
+        else:
+            self._context_layer_norm = torch.nn.Identity()
 
         self._qkv = conv_nd(1, in_channels, in_channels * 3, 1)
         self._attention = QKVAttention(self._num_heads)
@@ -80,7 +86,7 @@ class SpatialCrossAttention(ContextBlock):
         b, c, *spatial = x.shape
         qkv = self._qkv(self._norm(x).view(b, c, -1))
         if context is not None:
-            context = self._context_adapter(context)
+            context = self._context_layer_norm(self._context_adapter(context))
             if context is not None:
                 encoder_out = self._encoder_kv(context)
             else:
@@ -252,7 +258,7 @@ ChanLayerNorm = partial(LayerNorm, dim=-3)
 class TransformerAttention(torch.nn.Module):
     """Attention class used by DiT.
 
-    Based on the transformer attention in vision transfoermers from here:
+    Based on the transformer attention in vision transformers from here:
     https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py#L58C1-L106C17
     """
 

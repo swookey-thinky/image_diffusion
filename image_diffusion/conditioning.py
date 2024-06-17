@@ -17,6 +17,7 @@ from abc import abstractmethod
 import torch
 from typing import Dict, List
 
+from image_diffusion.layers.clip import FrozenCLIPTextTokenizer
 from image_diffusion.tokenizer.bpe import get_encoder
 from image_diffusion.utils import freeze
 
@@ -54,11 +55,16 @@ class TextTokenAdapter(torch.nn.Module):
 
 
 class TextEmbeddingsAdapter(torch.nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self, swap_context_channels: bool = False, **kwargs):
         super().__init__()
+        self._swap_context_channels = swap_context_channels
 
     def forward(self, context: Dict):
-        return context["text_embeddings"]
+        return (
+            context["text_embeddings"].permute(0, 2, 1)
+            if self._swap_context_channels
+            else context["text_embeddings"]
+        )
 
 
 class TextTokenProjectionAdapter(torch.nn.Module):
@@ -122,6 +128,25 @@ class TextPromptsPreprocessor(torch.nn.Module):
             # Add the text tokens to the context
             if "text_tokens" not in context:
                 context["text_tokens"] = tokens
+        return context
+
+
+class CLIPTextPromptsPreprocessor(torch.nn.Module):
+    def __init__(self, text_sequence_length: int, **kwargs):
+        super().__init__()
+        self._text_sequence_length = text_sequence_length
+        self._text_tokenizer = FrozenCLIPTextTokenizer(max_length=text_sequence_length)
+
+    def forward(self, context: Dict, device, **kwargs):
+        if "text_prompts" in context:
+            prompts = context["text_prompts"]
+
+            with torch.no_grad():
+                tokens_dict = self._text_tokenizer(prompts=prompts, device=device)
+
+            # Add the text tokens to the context
+            if "text_tokens" not in context:
+                context["text_tokens"] = tokens_dict
         return context
 
 

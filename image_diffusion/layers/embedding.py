@@ -2,10 +2,12 @@ from abc import abstractmethod
 from einops.layers.torch import Rearrange
 import math
 import torch
+from transformers import T5EncoderModel
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from image_diffusion.utils import freeze
 from image_diffusion.layers.attention import AttentionPooling
+from image_diffusion.layers.clip import FrozenCLIPTextEmbedder
 from image_diffusion.layers.utils import ContextBlock, Format, nchw_to, to_2tuple
 
 try:
@@ -133,11 +135,22 @@ class TextTokenProjection(torch.nn.Module):
         return self._projection(tokens)
 
 
+class CLIPTextTokenProjection(torch.nn.Module):
+    def __init__(self, text_sequence_length: int):
+        super().__init__()
+        self._embedder = FrozenCLIPTextEmbedder(max_length=text_sequence_length)
+
+    def forward(self, tokens, **kwargs):
+        # Tokens come in as a dictionary from the CLIP text encoder
+        assert "input_ids" in tokens and "attention_mask" in tokens
+        with torch.no_grad():
+            text_embeddings, last_hidden_state = self._embedder.embed(tokens=tokens)
+        return last_hidden_state.detach()
+
+
 class T5TextTokensToEmbedding(torch.nn.Module):
     def __init__(self, model_name: str):
         super().__init__()
-
-        from transformers import T5EncoderModel
 
         self._text_encoder = freeze(T5EncoderModel.from_pretrained(model_name))
 

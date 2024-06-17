@@ -18,6 +18,7 @@ from image_diffusion.diffusion import DiffusionModel
 from image_diffusion.cascade import GaussianDiffusionCascade
 
 OUTPUT_NAME = "output/mnist"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def train(
@@ -25,6 +26,7 @@ def train(
     batch_size: int,
     config_path: str,
     sample_with_guidance: bool,
+    save_and_sample_every_n: int,
 ):
     global OUTPUT_NAME
     OUTPUT_NAME = f"{OUTPUT_NAME}/{str(Path(config_path).stem)}"
@@ -123,10 +125,6 @@ def train(
 
     # Step counter to keep track of training
     step = 0
-
-    # We will sample the diffusion model every N steps, to monitor
-    # training and see how it improves over time.
-    save_and_sample_every_n = 100
 
     # Not mentioned in the DDPM paper, but the original implementation
     # used gradient clipping during training.
@@ -296,7 +294,7 @@ def sample(
         context["classes"] = classes
 
     if sample_with_guidance:
-        for guidance in [0.0, 1.0]:
+        for guidance in [0.0, 1.0, 2.0, 4.0, 7.0, 10.0, 20.0]:
             samples, intermediate_stage_output = diffusion_model.sample(
                 num_samples=num_samples,
                 context=context,
@@ -415,6 +413,7 @@ def main(override=None):
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--config_path", type=str, default="configs/glide.yaml")
     parser.add_argument("--sample_with_guidance", action="store_true")
+    parser.add_argument("--save_and_sample_every_n", type=int, default=100)
     args = parser.parse_args()
 
     train(
@@ -422,6 +421,7 @@ def main(override=None):
         batch_size=args.batch_size,
         config_path=args.config_path,
         sample_with_guidance=args.sample_with_guidance,
+        save_and_sample_every_n=args.save_and_sample_every_n,
     )
 
 
