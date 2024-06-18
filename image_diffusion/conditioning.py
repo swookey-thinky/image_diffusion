@@ -127,8 +127,8 @@ class TextPromptsPreprocessor(torch.nn.Module):
                 )
 
             # Add the text tokens to the context
-            if "text_tokens" not in context:
-                context["text_tokens"] = tokens
+            assert "text_tokens" not in context
+            context["text_tokens"] = tokens
         return context
 
 
@@ -146,8 +146,8 @@ class CLIPTextPromptsPreprocessor(torch.nn.Module):
                 tokens_dict = self._text_tokenizer(prompts=prompts, device=device)
 
             # Add the text tokens to the context
-            if "text_tokens" not in context:
-                context["text_tokens"] = tokens_dict
+            assert "text_tokens" not in context
+            context["text_tokens"] = tokens_dict
         return context
 
 
@@ -172,11 +172,11 @@ class T5TextPromptsPreprocessor(torch.nn.Module):
                 )
 
             # Add the text tokens to the context
-            if "text_tokens" not in context:
-                text_inputs_on_device = {}
-                for k, v in tokens_dict.items():
-                    text_inputs_on_device[k] = v.detach().to(device)
-                context["text_tokens"] = text_inputs_on_device
+            assert "text_tokens" not in context
+            text_inputs_on_device = {}
+            for k, v in tokens_dict.items():
+                text_inputs_on_device[k] = v.detach().to(device)
+            context["text_tokens"] = text_inputs_on_device
         return context
 
 

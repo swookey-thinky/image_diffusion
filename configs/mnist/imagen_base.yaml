@@ -29,7 +29,7 @@ diffusion:
           # The max length of the text token sequence
           max_length: 77
           # The name of the T5 text model to use
-          model_name: "google/t5-v1_1-small"
+          model_name: "google/t5-v1_1-base"
   # A preprocessor for input to the model.
   input_preprocessing:
     target: image_diffusion.conditioning.IgnoreInputPreprocessor
@@ -121,7 +121,7 @@ diffusion:
             # vocabulary size to text token embeddings.
             target: image_diffusion.layers.embedding.T5TextTokensToEmbedding
             params:
-              model_name: "google/t5-v1_1-small"
+              model_name: "google/t5-v1_1-base"
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
@@ -133,9 +133,9 @@ diffusion:
           # vector with Layer Norm
           - target: image_diffusion.layers.embedding.PooledTextEmbeddingsToTimestep
             params:
-              text_embedding_dim: 512
+              text_embedding_dim: 768
               time_embedding_dim: 512
-              attention_pooling_heads: 1
+              attention_pooling_heads: 64
         # The context transformer to use at each attention layer. This transforms
         # the context with a different set of parameters at each attention layer.
         context_transformer_layer:
@@ -144,17 +144,21 @@ diffusion:
             # The dimensionality of the context signal coming in.
             # -1 signifies no context coming in, and this defaults to Multi-Head
             # self attention.
-            context_dim: 512
+            context_dim: 768
             # The number of heads in the attention layer.
             heads: 1
             # The dimensionality of each attention head.
             dim_head: 64
             # Dropout probability to use in training.
             dropout: 0.1
+            # Imagen suggested layer norm at the cross attention layer helps.
+            context_layer_norm: True
             # The context adapter for the conditioning signal
             context_adapter:
               target: image_diffusion.conditioning.TextEmbeddingsAdapter
               params:
+                # For the cross attention, we want to operate on the embedding dimension,
+                # not the token sequence length.
                 swap_context_channels: True
 
 # Describes the dataset used in training.
