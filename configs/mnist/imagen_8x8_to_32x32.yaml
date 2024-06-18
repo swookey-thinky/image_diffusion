@@ -40,7 +40,7 @@ diffusion:
           # The max length of the text token sequence
           max_length: 77
           # The name of the T5 text model to use
-          model_name: "google/t5-v1_1-small"
+          model_name: "google/t5-v1_1-base"
   # A preprocessor for input to the model. For super resolution, this is
   # where we attach the low resolution input to the model input.
   input_preprocessing:
@@ -136,7 +136,7 @@ diffusion:
             # vocabulary size to text token embeddings.
             target: image_diffusion.layers.embedding.T5TextTokensToEmbedding
             params:
-              model_name: "google/t5-v1_1-small"
+              model_name: "google/t5-v1_1-base"
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
@@ -158,17 +158,23 @@ diffusion:
             # The dimensionality of the context signal coming in.
             # -1 signifies no context coming in, and this defaults to Multi-Head
             # self attention.
-            context_dim: 77
+            context_dim: 768
             # The number of heads in the attention layer.
             heads: 2
             # The dimensionality of each attention head.
             dim_head: 64
             # Dropout probability to use in training.
             dropout: 0.1
+            # Imagen suggested layer norm at the cross attention layer helps.
+            context_layer_norm: True
             # The context adapter for the conditioning signal
             context_adapter:
               target: image_diffusion.conditioning.TextEmbeddingsAdapter
-              params: {}
+              params:
+                # For the cross attention, we want to operate on the embedding dimension,
+                # not the token sequence length.
+                swap_context_channels: True
+
 # Describes the dataset used in training.
 data:
   # Spatial width/height of the data input to the model.
