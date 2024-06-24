@@ -214,6 +214,13 @@ class Unet(torch.nn.Module):
             ),
         )
 
+        # Run any special initializers
+        def _custom_init(module):
+            if hasattr(module, "custom_initializer"):
+                module.custom_initializer()
+
+        self.apply(_custom_init)
+
     def forward(
         self,
         x,

@@ -2,12 +2,13 @@ from abc import abstractmethod
 from einops.layers.torch import Rearrange
 import math
 import torch
-from transformers import T5EncoderModel
+from transformers import T5EncoderModel, T5Tokenizer
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
-from image_diffusion.utils import freeze
+from image_diffusion.utils import freeze, prob_mask_like
 from image_diffusion.layers.attention import AttentionPooling
 from image_diffusion.layers.clip import FrozenCLIPTextEmbedder
+from image_diffusion.layers.mlp import Mlp
 from image_diffusion.layers.utils import ContextBlock, Format, nchw_to, to_2tuple
 
 try:
@@ -135,6 +136,73 @@ class TextTokenProjection(torch.nn.Module):
         return self._projection(tokens)
 
 
+class ContextProjection(torch.nn.Module):
+    """Projects an entry in the context into a different dimensionality."""
+
+    def __init__(
+        self,
+        input_context_key: str,
+        output_context_key: str,
+        in_features: int,
+        hidden_features: int,
+        out_features: int,
+        custom_initialization: bool = False,
+        **kwargs,
+    ):
+        super().__init__()
+        self._input_context_key = input_context_key
+        self._output_context_key = output_context_key
+        self._custom_initialization = custom_initialization
+        self.y_proj = Mlp(
+            in_features=in_features,
+            hidden_features=hidden_features,
+            out_features=out_features,
+            act_layer=lambda: torch.nn.GELU(approximate="tanh"),
+            drop=0,
+        )
+
+    def forward(self, context: Dict, **kwargs):
+        assert self._input_context_key in context
+        context[self._output_context_key] = self.y_proj(
+            context[self._input_context_key]
+        )
+        return context
+
+    def custom_initializer(self):
+        if self._custom_initialization:
+            torch.nn.init.normal_(self.y_proj.fc1.weight, std=0.02)
+            torch.nn.init.normal_(self.y_proj.fc2.weight, std=0.02)
+
+
+class RunProjection(torch.nn.Module):
+    """Runs a defined projection."""
+
+    def __init__(
+        self,
+        input_context_key: str,
+        output_context_key: str,
+        projection_key: str,
+        projections: torch.nn.ModuleDict,
+        **kwargs,
+    ):
+        super().__init__()
+        self._input_context_key = input_context_key
+        self._output_context_key = output_context_key
+        self._projection_key = projection_key
+        self._projections = projections
+
+    def forward(self, context: Dict, device, **kwargs):
+        assert (
+            self._input_context_key in context
+        ), f"{self._input_context_key} not found for projection {self._projection_key}."
+        assert self._projection_key in self._projections
+
+        context[self._output_context_key] = self._projections[self._projection_key](
+            context[self._input_context_key], context=context, device=device
+        )
+        return context
+
+
 class CLIPTextTokenProjection(torch.nn.Module):
     def __init__(self, text_sequence_length: int):
         super().__init__()
@@ -148,6 +216,31 @@ class CLIPTextTokenProjection(torch.nn.Module):
         return last_hidden_state.detach()
 
 
+class T5TextPromptsToTokens(torch.nn.Module):
+    def __init__(self, max_length: int, model_name: str, **kwargs):
+        super().__init__()
+        self._max_length = max_length
+
+        self._tokenizer = T5Tokenizer.from_pretrained(model_name, legacy=False)
+
+    def forward(self, prompts, context: Dict, device, **kwargs):
+        with torch.no_grad():
+            tokens_dict = self._tokenizer(
+                prompts,
+                max_length=self._max_length,
+                padding="max_length",
+                truncation=True,
+                return_overflowing_tokens=False,
+                return_tensors="pt",
+            )
+
+        # Add the text tokens to the context
+        text_inputs_on_device = {}
+        for k, v in tokens_dict.items():
+            text_inputs_on_device[k] = v.detach().to(device)
+        return text_inputs_on_device
+
+
 class T5TextTokensToEmbedding(torch.nn.Module):
     def __init__(self, model_name: str):
         super().__init__()
@@ -156,7 +249,7 @@ class T5TextTokensToEmbedding(torch.nn.Module):
 
     def forward(self, tokens, context: Dict, **kwargs):
         # Tokens come in as a dictionary from the CLIP text encoder
-        assert "input_ids" in tokens and "attention_mask" in tokens
+        assert "input_ids" in tokens and "attention_mask" in tokens, f"{tokens}"
         with torch.no_grad():
             embedding_dict = self._text_encoder(**tokens)
         return embedding_dict["last_hidden_state"].detach()
@@ -172,14 +265,15 @@ class DiTTimestepEmbedding(torch.nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
-        # Initialize timestep embedding MLP:
-        torch.nn.init.normal_(self.mlp[0].weight, std=0.02)
-        torch.nn.init.normal_(self.mlp[2].weight, std=0.02)
-
     def forward(self, timestep: torch.Tensor, **kwargs):
         t_freq = self.timestep_embedding(timestep, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
         return t_emb
+
+    def custom_initializer(self):
+        # Initialize timestep embedding MLP:
+        torch.nn.init.normal_(self.mlp[0].weight, std=0.02)
+        torch.nn.init.normal_(self.mlp[2].weight, std=0.02)
 
     @staticmethod
     def timestep_embedding(t, dim, max_period=10000):
@@ -214,35 +308,59 @@ class DiTLabelEmbedding(torch.nn.Module):
     for classifier-free guidance.
     """
 
-    def __init__(self, num_classes, hidden_size):
+    def __init__(
+        self,
+        num_classes,
+        hidden_size,
+        drop_prob: float = 0.0,
+        unconditional_override: bool = False,
+    ):
         super().__init__()
 
         # Add one for classifier free guidance, if we have it.
         self.embedding_table = torch.nn.Embedding(num_classes + 1, hidden_size)
         self.num_classes = num_classes
+        self._unconditional_override = unconditional_override
+        self._drop_prob = drop_prob
 
         # Initialize label embedding table:
         torch.nn.init.normal_(self.embedding_table.weight, std=0.02)
 
-    def forward(self, labels):
+    def forward(self, labels, **kwargs):
+        if self._unconditional_override:
+            labels = torch.zeros_like(labels) + self.num_classes
         embeddings = self.embedding_table(labels)
+
+        if self._drop_prob > 0.0:
+            drop_mask = prob_mask_like(
+                (embeddings.shape[0],), self._drop_prob, device=embeddings.device
+            )
+            null_classes_emb = torch.zeros_like(embeddings)
+            embeddings = torch.where(drop_mask[:, None], null_classes_emb, embeddings)
         return embeddings
 
 
 class DiTCombineEmbeddngs(torch.nn.Module):
     """Combines the timestep and labels into a single embedding."""
 
-    def __init__(self, projections: torch.nn.ModuleDict, **kwargs):
+    def __init__(
+        self,
+        output_context_key: str,
+        source_context_keys: List[str],
+        projections: torch.nn.ModuleDict,
+        **kwargs,
+    ):
         super().__init__()
+        self._output_context_key = output_context_key
+        self._source_context_keys = source_context_keys
         self._projections = projections
 
-    def forward(self, context: Dict):
-        assert "classes" in context and "classes" in self._projections
+    def forward(self, context: Dict, **kwargs):
+        x = context[self._source_context_keys[0]]
 
-        # Project the classes in the class embeddings
-        y = self._projections["classes"](context["classes"])
-        t = context["timestep_embedding"]
-        context["timestep_embedding"] = y + t
+        for key in self._source_context_keys[1:]:
+            x += context[key]
+        context[self._output_context_key] = x
         return context
 
 

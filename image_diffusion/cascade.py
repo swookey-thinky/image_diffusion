@@ -54,6 +54,9 @@ class GaussianDiffusionCascade(DiffusionModel):
     def config(self) -> DotConfig:
         return self._config
 
+    def load_checkpoint(self, checkpoint_path: str):
+        assert False, "Loading model weights for a cascade not supported yet."
+
     def configure_optimizers(self, learning_rate: float) -> List[torch.optim.Optimizer]:
         optimizers = []
 

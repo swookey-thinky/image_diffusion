@@ -235,3 +235,74 @@ def prob_mask_like(shape, prob, device):
         return torch.zeros(shape, device=device, dtype=torch.bool)
     else:
         return torch.zeros(shape, device=device).float().uniform_(0, 1) < prob
+
+
+def fix_torchinfo_for_str():
+    import sys
+    import torchinfo
+
+    def get_total_memory_used(
+        data: torchinfo.torchinfo.CORRECTED_INPUT_DATA_TYPE,
+    ) -> int:
+        """Calculates the total memory of all tensors stored in data."""
+        result = torchinfo.torchinfo.traverse_input_data(
+            data,
+            action_fn=lambda data: sys.getsizeof(
+                data.untyped_storage()
+                if hasattr(data, "untyped_storage")
+                else data.storage()
+            ),
+            aggregate_fn=(
+                # We don't need the dictionary keys in this case
+                # if the data is not integer, assume the above action_fn is not applied for some reason
+                (
+                    lambda data: (
+                        lambda d: (
+                            sum(d.values())
+                            if isinstance(d, torchinfo.torchinfo.Mapping)
+                            else sys.getsizeof(d)
+                        )
+                    )
+                )
+                if (
+                    isinstance(data, torchinfo.torchinfo.Mapping)
+                    or not isinstance(data, int)
+                )
+                else sum
+            ),
+        )
+        return torchinfo.torchinfo.cast(int, result)
+
+    torchinfo.torchinfo.get_total_memory_used = get_total_memory_used
+
+
+def get_constant_schedule_with_warmup(
+    optimizer: torch.optim.Optimizer, num_warmup_steps: int, last_epoch: int = -1
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """
+    Create a schedule with a constant learning rate preceded by a warmup period during which the learning rate
+    increases linearly between 0 and the initial lr set in the optimizer.
+
+    Args:
+        optimizer ([`~torch.optim.Optimizer`]):
+            The optimizer for which to schedule the learning rate.
+        num_warmup_steps (`int`):
+            The number of steps for the warmup phase.
+        last_epoch (`int`, *optional*, defaults to -1):
+            The index of the last epoch when resuming training.
+
+    Return:
+        `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
+    """
+    print(
+        f"Creating constant learning rate schedule with {num_warmup_steps} warmup steps."
+    )
+
+    def lr_lambda(current_step: int):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1.0, num_warmup_steps))
+        return 1.0
+
+    return torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=last_epoch
+    )

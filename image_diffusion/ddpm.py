@@ -17,12 +17,14 @@ from image_diffusion.diffusion import DiffusionModel
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import (
     discretized_gaussian_log_likelihood,
+    fix_torchinfo_for_str,
     instantiate_from_config,
     instantiate_partial_from_config,
     normal_kl,
     normalize_to_neg_one_to_one,
     prob_mask_like,
     unnormalize_to_zero_to_one,
+    get_constant_schedule_with_warmup,
     DotConfig,
 )
 
@@ -330,8 +332,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Preprocess the context
         summary_context = self._context_preprocessor(summary_context, device="cpu")
 
-        # Remove the text prompts since they cause issues with torch summary.
-        del summary_context["text_prompts"]
+        # Monkey path torch summary to deal with str inputs from text prompts
+        fix_torchinfo_for_str()
         summary(
             self._score_network,
             input_data=[
@@ -345,7 +347,25 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             ],
         )
 
+    def load_checkpoint(self, checkpoint_path: str):
+        # Load the state dict for the score network
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if hasattr(self._score_network, "load_model_weights"):
+            state_dict = checkpoint["model_state_dict"]
+
+            # Only preserve the score network keys
+            score_network_state_pairs = []
+            namespace = "_score_network."
+            for k, v in state_dict.items():
+                if k.startswith(namespace):
+                    k = k[len(namespace) :]
+                    score_network_state_pairs.append((k, v))
+            self._score_network.load_model_weights(dict(score_network_state_pairs))
+        else:
+            self.load_state_dict(checkpoint["model_state_dict"])
+
     def configure_optimizers(self, learning_rate: float) -> List[torch.optim.Optimizer]:
+
         if "optimizer" in self._config:
             return [
                 instantiate_partial_from_config(self._config.optimizer.to_dict())(
@@ -355,6 +375,21 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         else:
             return [
                 torch.optim.Adam(self.parameters(), lr=learning_rate, betas=(0.9, 0.99))
+            ]
+
+    def configure_learning_rate_schedule(
+        self, optimizers: List[torch.optim.Optimizer]
+    ) -> List[torch.optim.lr_scheduler._LRScheduler]:
+        if "learning_rate_schedule" in self._config:
+            return [
+                get_constant_schedule_with_warmup(
+                    optimizers[0],
+                    **self._config.learning_rate_schedule.params.to_dict()
+                )
+            ]
+        else:
+            return [
+                get_constant_schedule_with_warmup(optimizers[0], num_warmup_steps=0)
             ]
 
     def _pred_epsilon(

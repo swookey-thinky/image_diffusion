@@ -27,7 +27,17 @@ class DiffusionModel(torch.nn.Module):
         pass
 
     @abstractmethod
+    def load_checkpoint(self, checkpoint_path: str):
+        pass
+
+    @abstractmethod
     def configure_optimizers(self, learning_rate: float) -> List[torch.optim.Optimizer]:
+        pass
+
+    @abstractmethod
+    def configure_learning_rate_schedule(
+        self, optimizers: List[torch.optim.Optimizer]
+    ) -> List[torch.optim.lr_scheduler._LRScheduler]:
         pass
 
     @abstractmethod

@@ -27,6 +27,7 @@ def train(
     config_path: str,
     sample_with_guidance: bool,
     save_and_sample_every_n: int,
+    load_model_weights_from_checkpoint: str,
 ):
     global OUTPUT_NAME
     OUTPUT_NAME = f"{OUTPUT_NAME}/{str(Path(config_path).stem)}"
@@ -91,6 +92,10 @@ def train(
     else:
         diffusion_model = GaussianDiffusion_DDPM(config=config)
 
+    # Load the model weights if we have them
+    if load_model_weights_from_checkpoint:
+        diffusion_model.load_checkpoint(load_model_weights_from_checkpoint)
+
     # Build context to display the model summary.
     diffusion_model.print_model_summary()
 
@@ -123,6 +128,15 @@ def train(
     for optimizer_idx in range(len(optimizers)):
         optimizers[optimizer_idx] = accelerator.prepare(optimizers[optimizer_idx])
 
+    # Configure the learning rate schedule
+    learning_rate_schedules = diffusion_model.configure_learning_rate_schedule(
+        optimizers
+    )
+    for schedule_idx in range(len(learning_rate_schedules)):
+        learning_rate_schedules[schedule_idx] = accelerator.prepare(
+            learning_rate_schedules[schedule_idx]
+        )
+
     # Step counter to keep track of training
     step = 0
 
@@ -146,8 +160,8 @@ def train(
 
             # Train each cascade in the model using the given data.
             stage_loss = 0
-            for model_for_layer, optimizer_for_layer in zip(
-                diffusion_model.models(), optimizers
+            for model_for_layer, optimizer_for_layer, schedule_for_layer in zip(
+                diffusion_model.models(), optimizers, learning_rate_schedules
             ):
                 # Is this a super resolution model? If it is, then generate
                 # the low resolution imagery as conditioning.
@@ -209,6 +223,7 @@ def train(
 
                 # Perform the gradient descent step using the optimizer.
                 optimizer_for_layer.step()
+                schedule_for_layer.step()
 
                 # Resent the gradients for the next step.
                 optimizer_for_layer.zero_grad()
@@ -414,6 +429,7 @@ def main(override=None):
     parser.add_argument("--config_path", type=str, default="configs/glide.yaml")
     parser.add_argument("--sample_with_guidance", action="store_true")
     parser.add_argument("--save_and_sample_every_n", type=int, default=100)
+    parser.add_argument("--load_model_weights_from_checkpoint", type=str, default="")
     args = parser.parse_args()
 
     train(
@@ -422,6 +438,7 @@ def main(override=None):
         config_path=args.config_path,
         sample_with_guidance=args.sample_with_guidance,
         save_and_sample_every_n=args.save_and_sample_every_n,
+        load_model_weights_from_checkpoint=args.load_model_weights_from_checkpoint,
     )
 
 

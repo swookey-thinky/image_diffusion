@@ -5,7 +5,7 @@ import math
 import numpy as np
 from typing import Dict
 
-from image_diffusion.layers.attention import TransformerAttention as Attention
+from image_diffusion.layers.attention import MultiHeadSelfAttention as Attention
 from image_diffusion.layers.embedding import PatchEmbed
 from image_diffusion.layers.mlp import Mlp
 from image_diffusion.layers.utils import get_2d_sincos_pos_embed
@@ -179,6 +179,13 @@ class DiT(torch.nn.Module):
         torch.nn.init.constant_(self.final_layer.linear.weight, 0)
         torch.nn.init.constant_(self.final_layer.linear.bias, 0)
 
+        # Run any special initializers
+        def _custom_init(module):
+            if hasattr(module, "custom_initializer"):
+                module.custom_initializer()
+
+        self.apply(_custom_init)
+
     def unpatchify(self, x):
         """Converts sequence of image patches into spatial image.
 
@@ -206,10 +213,6 @@ class DiT(torch.nn.Module):
         """
         # Don't change the original context
         context = context.copy()
-
-        # Convert the timestep t to an embedding
-        timestep_embedding = self._projections["timestep"](context["timestep"])
-        context["timestep_embedding"] = timestep_embedding
 
         # Transform the context at the top if we have it. This will generate
         # an embedding to combine with the timestep projection, and the embedded

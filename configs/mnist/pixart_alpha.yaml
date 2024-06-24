@@ -36,22 +36,21 @@ diffusion:
     # Unconditional guidance probability
     unconditional_guidance_probability: 0.2
     # The context signals to apply guidance to.
-    signals: ["classes"]
+    signals: ["text_prompts"]
     # For classifier free guidance, we need the ability to create an unconditional
     # context given the conditional context. This unconditional context needs
     # to be applied in both training and sampling, and will return a new
     # context dictionary given the original context dictionary.
     unconditional_context:
-      target: image_diffusion.conditioning.UnconditionalClassesAdapter
-      params:
-        num_classes: 10
+      target: image_diffusion.conditioning.UnconditionalTextPromptsAdapter
+      params: {}
   dynamic_thresholding:
     enable: True
     p: 0.99
     c: 1.7
   # Defines the score network for predicting the noise parameter
   score_network:
-    target: image_diffusion.score_networks.dit.DiT
+    target: image_diffusion.score_networks.pixart.PixArtAlpha
     params:
       # The number of input channels to the model.
       input_channels: 1
@@ -61,7 +60,8 @@ diffusion:
       input_spatial_size: 32
       # Spatial size of each image patch
       patch_size: 8
-      # Hidden size of the transformer
+      # Hidden size of the transformer. This is also the dimensionality
+      # of the cross attention context.
       hidden_size: 384
       # Transformer depth (number of transformer blocks)
       depth: 12
@@ -73,19 +73,26 @@ diffusion:
       # Does the model include a learned sigma or a fixed sigma.
       is_learned_sigma: False
       # True if this is a class conditional model
-      is_class_conditional: True
-      # Dropout scale
-      dropout: 0.1
+      is_class_conditional: False
+      # Dropout scale, using stochastic depth dropout
+      drop_path: 0.1
       # The number of classes for a class conditional model.
       # Only used if is_class_conditional=True.
       num_classes: 10
+
+      use_rel_pos: False
+      lewei_scale: 1.0
+
+      # The context signal that will be used in cross attention at each block.
+      context_key: "context_embeddings"
+
       # Additional conditioning signals for the model. The projections
       # defined here will be applied before running through the rest of the
       # score network.
       conditioning:
         # The signals (keys in the dictionary) that are available in the conditioning
         # context.
-        signals: ["timestep", "classes"]
+        signals: ["timestep", "classes", "text_tokens", "text_prompts"]
         projections:
           # A projection to apply to the integer timesteps.
           timestep:
@@ -96,11 +103,30 @@ diffusion:
               hidden_size: 384
               frequency_embedding_size: 256
           classes:
-            # Defines a projection incorporating for class labels
+            # Defines a projection incorporating the class labels
             target: image_diffusion.layers.embedding.DiTLabelEmbedding
             params:
               hidden_size: 384
               num_classes: 10
+              # Drop all class embeddings because they are not used
+              drop_prob: 1.0
+          # A projection to apply to the text tokens in the conditioning context.
+          text_tokens:
+            # Defines an embedding which goes from text tokens at the given
+            # vocabulary size to text token embeddings.
+            target: image_diffusion.layers.embedding.T5TextTokensToEmbedding
+            params:
+              model_name: "google/t5-v1_1-base"
+          text_prompts:
+            # The Prompts Preprocessor converts the list of text prompts in the context
+            # into a batch of text tokens of shape (B, text_context_size)
+            target: image_diffusion.layers.embedding.T5TextPromptsToTokens
+            params:
+              # The max length of the text token sequence
+              max_length: 77
+              # The name of the T5 text model to use
+              model_name: "google/t5-v1_1-base"
+
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
@@ -116,12 +142,34 @@ diffusion:
               input_context_key: "classes"
               output_context_key: "class_embeddings"
               projection_key: "classes"
-          # Combines the timestep and class embedding signals into a single embedding
+          # Text prompts -> text tokens
+          - target: image_diffusion.layers.embedding.RunProjection
+            params:
+              input_context_key: "text_prompts"
+              output_context_key: "text_tokens"
+              projection_key: "text_prompts"
+          # Text tokens -> text embeddings
+          - target: image_diffusion.layers.embedding.RunProjection
+            params:
+              input_context_key: "text_tokens"
+              output_context_key: "text_embeddings"
+              projection_key: "text_tokens"
+          # Combines the timestep and class embedding signals into a single embedding.
+          # For PixArt-Alpha, in the text alignment case, we ignore the class embeddings,
+          # so skip them here.
           - target: image_diffusion.layers.embedding.DiTCombineEmbeddngs
             params:
               output_context_key: "timestep_embedding"
-              source_context_keys: ["class_embeddings", "timestep_embedding"]
-
+              source_context_keys: ["timestep_embedding"]
+          # Projects the text embeddings into the cross attention layers.
+          - target: image_diffusion.layers.embedding.ContextProjection
+            params:
+              input_context_key: "text_embeddings"
+              output_context_key: "context_embeddings"
+              in_features: 768
+              hidden_features: 384
+              out_features: 384
+              custom_initialization: True
         # The context transformer to use at each attention layer. This transforms
         # the context with a different set of parameters at each attention layer.
         context_transformer_layer:
@@ -141,3 +189,7 @@ optimizer:
   params:
     lr: .0002
     betas: [0.9, 0.99]
+learning_rate_schedule:
+  schedule: constant
+  params:
+    num_warmup_steps: 1000

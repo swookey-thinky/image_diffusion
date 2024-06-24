@@ -94,11 +94,11 @@ class UnconditionalTextPromptsAdapter(torch.nn.Module):
 
 
 class UnconditionalClassesAdapter(torch.nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, **kwargs):
         super().__init__()
         self._num_classes = num_classes
 
-    def forward(self, context: Dict):
+    def forward(self, context: Dict, **kwargs):
         new_context = context.copy()
         classes = context["classes"]
         new_context["classes"] = torch.zeros_like(classes) + self._num_classes
