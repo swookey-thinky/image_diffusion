@@ -7,7 +7,6 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from image_diffusion.ddpm import GaussianDiffusion_DDPM
 from image_diffusion.diffusion import DiffusionModel
-from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import (
     discretized_gaussian_log_likelihood,
     instantiate_from_config,

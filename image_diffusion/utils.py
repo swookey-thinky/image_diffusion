@@ -306,3 +306,18 @@ def get_constant_schedule_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda, last_epoch=last_epoch
     )
+
+
+def broadcast_from_left(x, shape):
+    assert len(shape) >= x.ndim
+    return torch.broadcast_to(x.reshape(x.shape + (1,) * (len(shape) - x.ndim)), shape)
+
+
+def log1mexp(x):
+    """Accurate computation of log(1 - exp(-x)) for x > 0."""
+    # From James Townsend's PixelCNN++ code
+    # Method from
+    # https://cran.r-project.org/web/packages/Rmpfr/vignettes/log1mexp-note.pdf
+    return torch.where(
+        x > np.log(2), torch.log1p(-torch.exp(-x)), torch.log(-torch.expm1(-x))
+    )

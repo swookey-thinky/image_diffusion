@@ -1,9 +1,15 @@
 from abc import abstractmethod
+from enum import Enum
 import torch
 from typing import Callable, Dict, List, Optional, Tuple
 from typing_extensions import Self
 
 from image_diffusion.utils import DotConfig
+
+
+class PredictionType(Enum):
+    EPSILON = "epsilon"
+    V = "v"
 
 
 class DiffusionModel(torch.nn.Module):
