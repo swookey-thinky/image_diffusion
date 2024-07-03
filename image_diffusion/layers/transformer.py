@@ -289,7 +289,7 @@ class GLIDETransformerWrapper(torch.nn.Module):
             width, output_projection_dimension
         )
 
-    def forward(self, context: Dict):
+    def forward(self, context: Dict, **kwargs):
         # Check for text embeddings. If we have them, they supercede text tokens
         if "text_embedding" in context:
             # Use the text embedding directly

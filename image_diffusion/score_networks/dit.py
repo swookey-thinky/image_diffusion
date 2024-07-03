@@ -218,7 +218,7 @@ class DiT(torch.nn.Module):
         # an embedding to combine with the timestep projection, and the embedded
         # context.
         for context_transformer in self._context_transformers:
-            context = context_transformer(context)
+            context = context_transformer(context, device=x.device)
 
         x = (
             self.x_embedder(x) + self.pos_embed

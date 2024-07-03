@@ -90,7 +90,7 @@ class GaussianConditioningAugmentationToTimestep(torch.nn.Module):
             num_features, time_embedding_mult
         )
 
-    def forward(self, context: Dict):
+    def forward(self, context: Dict, **kwargs):
         assert "timestep_embedding" in context
         assert "augmentation_timestep" in context
 

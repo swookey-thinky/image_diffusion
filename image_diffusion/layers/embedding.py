@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from einops.layers.torch import Rearrange
 import math
+import numpy as np
 import torch
 from transformers import T5EncoderModel, T5Tokenizer
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -43,13 +44,17 @@ class SinusoidalPositionEmbedding(torch.nn.Module):
     https://github.com/tensorflow/tensor2tensor/blob/master/tensor2tensor/layers/common_attention.py#L408
     """
 
-    def __init__(self, embedding_dim, theta=10000):
+    def __init__(self, embedding_dim, max_time: float, theta=10000):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.theta = theta
+        self.max_time = max_time
 
-    def forward(self, x, **kwargs):
-        device = x.device
+    def forward(self, t, **kwargs):
+        device = t.device
+
+        x = t * 1000.0 / self.max_time
+
         half_dim = self.embedding_dim // 2
         embedding = math.log(self.theta) / (half_dim - 1)
         embedding = torch.exp(torch.arange(half_dim, device=device) * -embedding)
@@ -59,11 +64,17 @@ class SinusoidalPositionEmbedding(torch.nn.Module):
 
 
 class TimestepEmbeddingProjection(torch.nn.Module):
-    def __init__(self, num_features: int, time_embedding_mult: int):
+    def __init__(
+        self,
+        num_features: int,
+        time_embedding_mult: int,
+        max_time: float = 1000.0,
+        **kwargs,
+    ):
         super().__init__()
         time_embedding_dimension = num_features * time_embedding_mult
         self._projection = torch.nn.Sequential(
-            SinusoidalPositionEmbedding(num_features),
+            SinusoidalPositionEmbedding(num_features, max_time=max_time),
             torch.nn.Linear(num_features, time_embedding_dimension),
             torch.nn.SiLU(),
             torch.nn.Linear(time_embedding_dimension, time_embedding_dimension),
@@ -76,6 +87,45 @@ class TimestepEmbeddingProjection(torch.nn.Module):
         projection = self._projection(timestep)
         if torch.isnan(projection).any():
             print(timestep)
+            print(projection)
+            assert False
+        return projection
+
+
+class InvCosTimestepEmbeddingProjection(torch.nn.Module):
+    def __init__(
+        self,
+        num_features: int,
+        time_embedding_mult: int,
+        max_time: float = 1000.0,
+        clip_min: int = -20,
+        clip_max: int = 20,
+    ):
+        super().__init__()
+        self._clip_min = clip_min
+        self._clip_max = clip_max
+
+        time_embedding_dimension = num_features * time_embedding_mult
+        self._projection = torch.nn.Sequential(
+            SinusoidalPositionEmbedding(num_features, max_time=max_time),
+            torch.nn.Linear(num_features, time_embedding_dimension),
+            torch.nn.SiLU(),
+            torch.nn.Linear(time_embedding_dimension, time_embedding_dimension),
+        )
+
+    def forward(self, timestep: torch.Tensor, **kwargs):
+        timestep_input = torch.arctan(
+            torch.exp(-0.5 * torch.clip(timestep, self._clip_min, self._clip_max))
+        ) / (0.5 * np.pi)
+
+        # Make sure there are no NaNs in the timestep embedding.
+        # This is a debugging step because on my local 3090
+        # this seems to happen sometimes, not sure why.
+        projection = self._projection(timestep_input)
+        if torch.isnan(projection).any():
+            print(timestep)
+            print(projection)
+            print(timestep_input)
             assert False
         return projection
 
@@ -96,7 +146,7 @@ class PooledTextEmbeddingsToTimestep(torch.nn.Module):
             torch.nn.LayerNorm(time_embedding_dim),
         )
 
-    def forward(self, context: Dict):
+    def forward(self, context: Dict, **kwargs):
         assert "text_embeddings" in context
         assert "timestep_embedding" in context
         pooling_out = self._encoder_pooling(context["text_embeddings"])

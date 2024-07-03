@@ -73,7 +73,7 @@ class TextTokenProjectionAdapter(torch.nn.Module):
         super().__init__()
         self._projections = projections
 
-    def forward(self, context: Dict):
+    def forward(self, context: Dict, **kwargs):
         context["text_embeddings"] = self._projections["text_tokens"](
             context["text_tokens"], context=context
         )

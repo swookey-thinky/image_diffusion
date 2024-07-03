@@ -9,13 +9,14 @@ from einops import reduce
 import numpy as np
 import torch
 from torchinfo import summary
-from torchvision import transforms
 from tqdm import tqdm
 from typing import Callable, Dict, List, Optional, Tuple
+from typing_extensions import Self
 
-from image_diffusion.diffusion import DiffusionModel
+from image_diffusion.diffusion import DiffusionModel, PredictionType
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import (
+    broadcast_from_left,
     discretized_gaussian_log_likelihood,
     fix_torchinfo_for_str,
     instantiate_from_config,
@@ -38,11 +39,21 @@ class GaussianDiffusion_DDPM(DiffusionModel):
 
     def __init__(self, config: DotConfig):
         super().__init__()
+        self._config = config
+
+        if config.diffusion.parameterization == "epsilon":
+            self._prediction_type = PredictionType.EPSILON
+        elif config.diffusion.parameterization == "v":
+            self._prediction_type = PredictionType.V
+        else:
+            raise NotImplemented(
+                f"Parameterization {config.difusion.parameterization} not implemented."
+            )
+
         self._score_network = instantiate_from_config(
             config.diffusion.score_network, use_config_struct=True
         )
 
-        self._config = config
         self._is_learned_sigma = config.diffusion.score_network.params.is_learned_sigma
         self._is_class_conditional = (
             config.diffusion.score_network.params.is_class_conditional
@@ -54,13 +65,11 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         self._classifier_free_guidance = (
             config.diffusion.classifier_free_guidance.classifier_free_guidance
         )
-        self._noise_scheduler = NoiseScheduler(
-            beta_schedule=config.diffusion.noise_scheduler.schedule,
-            timesteps=config.diffusion.noise_scheduler.num_scales,
-            loss_type=config.diffusion.noise_scheduler.loss_type,
+        self._noise_scheduler: NoiseScheduler = instantiate_from_config(
+            config.diffusion.noise_scheduler.to_dict()
         )
         self._importance_sampler = instantiate_from_config(
-            config.diffusion.noise_scheduler.sampler.to_dict()
+            config.diffusion.importance_sampler.to_dict()
         )
 
         # TODO: Add the full list
@@ -101,6 +110,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         """
         B, _, H, W = images.shape
         device = images.device
+        context = context.copy()
 
         # The images are normalized into the range (-1, 1),
         # from Section 3.3:
@@ -109,7 +119,15 @@ class GaussianDiffusion_DDPM(DiffusionModel):
 
         # Line 3, calculate the random timesteps for the training batch.
         # Use importance sampling here if desired.
-        t, weights = self._importance_sampler.sample(batch_size=B, device=device)
+        if self._noise_scheduler.continuous():
+            # TODO: Update importance sampling for continuous timesteps
+            t = self._noise_scheduler.sample_random_times(batch_size=B)
+            weights = torch.ones_like(t)
+
+            # Add the logsnr to the context if we are continuous
+            context["logsnr_t"] = self._noise_scheduler.logsnr(t)
+        else:
+            t, weights = self._importance_sampler.sample(batch_size=B, device=device)
         context["timestep"] = t
 
         # Line 4, sample from a Gaussian with mean 0 and unit variance.
@@ -154,7 +172,6 @@ class GaussianDiffusion_DDPM(DiffusionModel):
                         conditional_context_signal,
                     )
                 context[key] = updated_context_signal
-
         # Preprocess any of the context before it hits the score network.
         # For example, if we have prompts, then convert them
         # into text tokens or text embeddings.
@@ -175,13 +192,24 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         if self._is_learned_sigma:
             # If we are a learned sigma model, the model is predicting
             # both epsilon, and the re-parameterized estimate of the variance.
-            epsilon_theta, learned_variance = model_output
+            model_prediction, learned_variance = model_output
         else:
-            epsilon_theta = model_output
+            model_prediction = model_output
+
+        if self._prediction_type == PredictionType.EPSILON:
+            prediction_target = epsilon
+        elif self._prediction_type == PredictionType.V:
+            prediction_target = self._noise_scheduler.predict_v_from_x_and_epsilon(
+                x=x_0, epsilon=epsilon, t=t
+            )
+        else:
+            raise NotImplemented(
+                f"Prediction type {self._prediction_type} not implemented."
+            )
 
         # Line 5, calculate MSE of epsilon, epsilon_theta (predicted_eps)
         mse_loss = torch.nn.functional.mse_loss(
-            epsilon_theta, epsilon, reduction="none"
+            model_prediction, prediction_target, reduction="none"
         )
         mse_loss = reduce(mse_loss, "b ... -> b", "mean")
 
@@ -190,7 +218,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         vb_loss = torch.zeros_like(mse_loss)
         if self._is_learned_sigma:
             # Stop the gradients from epsilon from flowing into the VB loss term
-            frozen_out = [epsilon_theta.detach(), learned_variance]
+            frozen_out = [model_prediction.detach(), learned_variance]
             vb_loss = self._vb_bits_per_dim(
                 epsilon_v_param=frozen_out,
                 x_0=x_0,
@@ -215,12 +243,217 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             "vb_loss": vb_loss.mean(),
         }
 
+    def distillation_loss_on_batch(
+        self,
+        images,
+        N,
+        context: Dict,
+        teacher_diffusion_model: Self,
+    ) -> Dict:
+        """Calculates the reverse process loss on a batch of images.
+
+        Args:
+            images: Tensor batch of images, of shape [B, C, H, W]
+            prompts: List of prompts to use for conditioning, of length B
+            clip_embedder: The CLIP model to use for image and text embeddings.
+            low_resolution_images: Tensor batch of low resolution images, if this is
+                part of a cascade.
+            y: Tensor batch of class labels, if they exist.
+
+        Returns:
+            Dictionary of loss values, of which the "loss" entry will
+            be the training loss.
+        """
+        B, _, H, W = images.shape
+        device = images.device
+        context = context.copy()
+
+        # The images are normalized into the range (-1, 1),
+        # from Section 3.3:
+        # "We assume that image data consists of integers in {0, 1, . . . , 255} scaled linearly to [−1, 1]."
+        x_0 = normalize_to_neg_one_to_one(images)
+
+        # Line 3, calculate the random timesteps for the training batch.
+        # Use importance sampling here if desired.
+        assert self._noise_scheduler.continuous()
+
+        # Sample random times
+        # t = i/N, i ∼ Cat[1, 2, . . . , N]
+        t = torch.randint(
+            0,
+            N,
+            (B,),
+            device=device,
+            dtype=torch.float32,
+        )
+        t = t / N
+
+        # Add the logsnr to the context if we are continuous
+        context["logsnr_t"] = self._noise_scheduler.logsnr(t)
+        context["timestep"] = t
+
+        # Line 4, sample from a Gaussian with mean 0 and unit variance.
+        # This is the epsilon prediction target.
+        epsilon = torch.randn_like(x_0)
+
+        # Perform classifier free guidance over the context. This means
+        # jointly train a conditional and unconditional model.
+        if self._unconditional_guidance_probability > 0.0:
+            # Merge the unconditional context with the conditional context
+            unconditional_context = self._unconditional_context(context)
+            conditional_context = context.copy()
+            cfg_mask = prob_mask_like(
+                shape=(B,), prob=self._unconditional_guidance_probability, device=device
+            )
+
+            for key in self._config.diffusion.classifier_free_guidance.signals:
+                # Lists and tensors needs to be merged differently.
+                conditional_context_signal = conditional_context[key]
+                unconditional_context_signal = unconditional_context[key]
+
+                if isinstance(conditional_context_signal, list):
+                    assert len(conditional_context_signal) == B
+                    assert len(unconditional_context_signal) == B
+
+                    updated_context_signal = [
+                        (
+                            unconditional_context_signal[idx]
+                            if cfg_mask[idx]
+                            else conditional_context_signal[idx]
+                        )
+                        for idx in range(B)
+                    ]
+                else:
+                    # The context is a tensor type
+                    updated_context_signal = torch.where(
+                        cfg_mask,
+                        unconditional_context_signal,
+                        conditional_context_signal,
+                    )
+                context[key] = updated_context_signal
+
+        # Preprocess any of the context before it hits the score network.
+        # For example, if we have prompts, then convert them
+        # into text tokens or text embeddings.
+        context = self._context_preprocessor(context, device)
+
+        # Process the input
+        z_t = self._noise_scheduler.q_sample(x_start=x_0, t=t, noise=epsilon)
+        z_t = self._input_preprocessor(
+            x=z_t, context=context, noise_scheduler=self._noise_scheduler
+        )
+
+        # 2 steps of DDIM with teacher
+        assert not self._is_learned_sigma, "Learned sigma not implemented yet."
+        with torch.no_grad():
+            teacher_score_z_t = teacher_diffusion_model._score_network(
+                z_t, context=context
+            )
+            x_pred = self._noise_scheduler.predict_x_from_v(
+                z=z_t, v=teacher_score_z_t, context=context
+            )
+            eps_pred = self._noise_scheduler.predict_epsilon_from_x(
+                z=z_t, x=x_pred, context=context
+            )
+
+        u = t
+        logsnr = self._noise_scheduler.logsnr(u)
+
+        u_mid = u - 0.5 / N
+        logsnr_mid = self._noise_scheduler.logsnr(u_mid)
+        stdv_mid = broadcast_from_left(
+            torch.sqrt(torch.nn.functional.sigmoid(-logsnr_mid)), shape=z_t.shape
+        )
+        a_mid = broadcast_from_left(
+            torch.sqrt(torch.nn.functional.sigmoid(logsnr_mid)), shape=z_t.shape
+        )
+        z_mid = a_mid * x_pred + stdv_mid * eps_pred
+
+        with torch.no_grad():
+            context_tp = context.copy()
+            context_tp["logsnr_t"] = logsnr_mid
+            context_tp["timestep"] = u_mid
+            teacher_score_z_tp = teacher_diffusion_model._score_network(
+                z_mid, context=context_tp
+            )
+            x_pred = self._noise_scheduler.predict_x_from_v(
+                z=z_t, v=teacher_score_z_tp, context=context
+            )
+            eps_pred = self._noise_scheduler.predict_epsilon_from_x(
+                z=z_t, x=x_pred, context=context
+            )
+
+        u_s = u - 1.0 / N
+        logsnr_s = self._noise_scheduler.logsnr(u_s)
+        stdv_s = broadcast_from_left(
+            torch.sqrt(torch.nn.functional.sigmoid(-logsnr_s)), shape=z_t.shape
+        )
+        a_s = broadcast_from_left(
+            torch.sqrt(torch.nn.functional.sigmoid(logsnr_s)), shape=z_t.shape
+        )
+        z_teacher = a_s * x_pred + stdv_s * eps_pred
+
+        # get x-target implied by z_teacher (!= x_pred)
+        a_t = broadcast_from_left(
+            torch.sqrt(torch.nn.functional.sigmoid(logsnr)), shape=z_t.shape
+        )
+        stdv_frac = broadcast_from_left(
+            torch.exp(
+                0.5
+                * (
+                    torch.nn.functional.softplus(logsnr)
+                    - torch.nn.functional.softplus(logsnr_s)
+                )
+            ),
+            shape=z_t.shape,
+        )
+        x_target = (z_teacher - stdv_frac * z_t) / (a_s - stdv_frac * a_t)
+        x_target = torch.where(
+            broadcast_from_left(t == 0, x_pred.shape), x_pred, x_target
+        )
+        eps_target = self._noise_scheduler.predict_epsilon_from_x(
+            z=z_t, x=x_target, context=context
+        )
+        v_target = self._noise_scheduler.predict_v_from_x_and_epsilon(
+            x=x_target, epsilon=eps_target, t=t
+        )
+
+        # denoising loss
+        x_hat_score = self._score_network(z_t, context=context)
+
+        model_x = self._noise_scheduler.predict_x_from_v(
+            z=z_t, v=x_hat_score, context=context
+        )
+        model_eps = self._noise_scheduler.predict_epsilon_from_x(
+            z=z_t, x=model_x, context=context
+        )
+        model_v = x_hat_score
+
+        def meanflat(x):
+            return x.mean(axis=tuple(range(1, len(x.shape))))
+
+        x_mse = meanflat(torch.square(model_x - x_target))
+        eps_mse = meanflat(torch.square(model_eps - eps_target))
+        v_mse = meanflat(torch.square(model_v - v_target))
+
+        mean_loss_weight_type = "snr"  # SNR+1 weighting
+        if mean_loss_weight_type == "constant":  # constant weight on x_mse
+            loss = x_mse
+        elif mean_loss_weight_type == "snr":  # SNR * x_mse = eps_mse
+            loss = eps_mse
+        elif mean_loss_weight_type == "snr_trunc":  # x_mse * max(SNR, 1)
+            loss = torch.maximum(x_mse, eps_mse)
+        elif mean_loss_weight_type == "v_mse":
+            loss = v_mse
+        return {"loss": loss.mean()}
+
     def sample(
         self,
         context: Optional[Dict] = None,
         num_samples: int = 16,
         guidance_fn: Optional[Callable] = None,
         classifier_free_guidance: Optional[float] = None,
+        num_sampling_steps: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
         """Unconditionally/conditionally sample from the diffusion model.
 
@@ -268,12 +501,19 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # into text tokens or text embeddings.
         context = self._context_preprocessor(context, device)
 
+        sampling_steps = (
+            num_sampling_steps
+            if num_sampling_steps is not None
+            else self._noise_scheduler.steps()
+        )
+
         latent_samples = self._p_sample_loop(
             shape,
             context=context,
             unconditional_context=unconditional_context,
             guidance_fn=guidance_fn,
             classifier_free_guidance=classifier_free_guidance,
+            num_sampling_steps=sampling_steps,
         )
         latents = latent_samples
 
@@ -309,7 +549,12 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         batch_size = 128
 
         summary_context = {
-            "timestep": torch.randint(0, 10, size=(batch_size,)),
+            "timestep": (
+                torch.rand(size=(batch_size,))
+                if self._noise_scheduler.continuous()
+                else torch.randint(0, 10, size=(batch_size,))
+            ),
+            "logsnr_t": torch.rand(size=(batch_size,)),
             "text_prompts": [""] * batch_size,
             "classes": torch.randint(
                 0, self._config.data.num_classes, size=(batch_size,)
@@ -384,7 +629,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             return [
                 get_constant_schedule_with_warmup(
                     optimizers[0],
-                    **self._config.learning_rate_schedule.params.to_dict()
+                    **self._config.learning_rate_schedule.params.to_dict(),
                 )
             ]
         else:
@@ -441,7 +686,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             # only model, we use the "fixedlarge" estimate of
             # the variance.
             variance, log_variance = self._noise_scheduler.variance_fixed_large(
-                context["timestep"], x.shape
+                context, x.shape
             )
         return epsilon_theta, variance, log_variance
 
@@ -510,8 +755,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
                 epsilon_theta - uncond_epsilon_theta
             )
 
-            # It's not clear from the paper how to guide v-param models, but we will treat
-            # them the same as the epsilon-param models
+            # It's not clear from the paper how to guide learned sigma models,
+            # but we will treat them the same as the epsilon-param models
             variance = uncond_variance + w * (variance - uncond_variance)
             log_variance = uncond_log_variance + w * (
                 log_variance - uncond_log_variance
@@ -520,9 +765,19 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         _maybe_clip = lambda x_: (torch.clamp(x_, -1.0, 1.0) if clip_denoised else x_)
 
         # Epsilon prediction (mean reparameterization)
-        pred_xstart = self._noise_scheduler.predict_xstart_from_epsilon(
-            x_t=x, t=context["timestep"], epsilon=epsilon_theta
-        )
+        if self._prediction_type == PredictionType.EPSILON:
+            pred_xstart = self._noise_scheduler.predict_x_from_epsilon(
+                z=x, context=context, epsilon=epsilon_theta
+            )
+        elif self._prediction_type == PredictionType.V:
+            # V-prediction, from https://arxiv.org/abs/2202.00512
+            pred_xstart = self._noise_scheduler.predict_x_from_v(
+                z=x, context=context, v=epsilon_theta
+            )
+        else:
+            raise NotImplemented(
+                f"Prediction type {self._prediction_type} is not implemented."
+            )
 
         if (
             "dynamic_thresholding" in self._config.diffusion
@@ -537,10 +792,10 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         else:
             pred_xstart = _maybe_clip(pred_xstart)
 
-            # Set the mean of the reverse process equal to the mean of the forward process
+        # Set the mean of the reverse process equal to the mean of the forward process
         # posterior.
         model_mean, _, _ = self._noise_scheduler.q_posterior(
-            x_start=pred_xstart, x_t=x, t=context["timestep"]
+            x_start=pred_xstart, x_t=x, context=context
         )
         return model_mean, variance, log_variance
 
@@ -549,6 +804,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         shape,
         context: Dict,
         unconditional_context: Optional[Dict],
+        num_sampling_steps: int,
         guidance_fn=None,
         classifier_free_guidance: Optional[float] = None,
     ):
@@ -577,10 +833,10 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Initial image is pure noise
         x_t = torch.randn(shape, device=device)
 
-        for t in tqdm(
-            reversed(range(0, self._noise_scheduler.num_timesteps)),
+        for timestep_idx in tqdm(
+            reversed(range(0, num_sampling_steps)),
             desc="sampling loop time step",
-            total=self._noise_scheduler.num_timesteps,
+            total=num_sampling_steps,
             leave=False,
         ):
             # Some of the score network preprocessors can update the
@@ -592,8 +848,29 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             else:
                 unconditional_context_for_timestep = None
 
-            t = torch.tensor([t] * shape[0], device=device)
+            t = torch.tensor([timestep_idx] * shape[0], device=device)
+            if self._noise_scheduler.continuous():
+                context_for_timestep["timestep_idx"] = timestep_idx
+                context_for_timestep["logsnr_s"] = self._noise_scheduler.logsnr(
+                    t / num_sampling_steps
+                )
+
+                t_plus_1 = t + 1
+                context_for_timestep["logsnr_t"] = self._noise_scheduler.logsnr(
+                    t_plus_1 / num_sampling_steps
+                )
+
+                if unconditional_context_for_timestep is not None:
+                    unconditional_context_for_timestep["timestep_idx"] = timestep_idx
+                    unconditional_context_for_timestep["logsnr_s"] = (
+                        self._noise_scheduler.logsnr(t / num_sampling_steps)
+                    )
+                    unconditional_context_for_timestep["logsnr_t"] = (
+                        self._noise_scheduler.logsnr(t_plus_1 / num_sampling_steps)
+                    )
+                t = t / num_sampling_steps
             context_for_timestep["timestep"] = t
+
             if unconditional_context_for_timestep is not None:
                 unconditional_context_for_timestep["timestep"] = t
 
@@ -608,6 +885,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
 
         return x_t
 
+    @torch.no_grad()
     def _p_sample(
         self,
         x,
@@ -634,17 +912,13 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         Returns:
             Tensor batch of the distribution at timestep t-1.
         """
-        B, _, _, _ = x.shape
-        device = x.device
-
-        with torch.no_grad():
-            model_mean, model_variance, model_log_variance = self._p_mean_variance(
-                x=x,
-                context=context,
-                unconditional_context=unconditional_context,
-                clip_denoised=True,
-                classifier_free_guidance=classifier_free_guidance,
-            )
+        model_mean, model_variance, model_log_variance = self._p_mean_variance(
+            x=x,
+            context=context,
+            unconditional_context=unconditional_context,
+            clip_denoised=True,
+            classifier_free_guidance=classifier_free_guidance,
+        )
 
         # No noise if t = 0
         t = context["timestep"]
@@ -687,7 +961,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             or KL divergence for subsequent timesteps.
         """
         true_mean, _, true_log_variance_clipped = self._noise_scheduler.q_posterior(
-            x_start=x_0, x_t=x_t, t=context["timestep"]
+            x_start=x_0, x_t=x_t, context=context
         )
 
         # When calculating the variational lower bound, we disable

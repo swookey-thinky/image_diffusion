@@ -233,21 +233,11 @@ class Unet(torch.nn.Module):
             t: Tensor batch of timestep indices.
             y: (Optional) Tensor batch of integer class labels.
         """
-        # Convert the timestep t to an embedding
-        timestep_embedding = self._projections["timestep"](context["timestep"])
-        context["timestep_embedding"] = timestep_embedding
-
         # Transform the context at the top if we have it. This will generate
         # an embedding to combine with the timestep projection, and the embedded
         # context.
         for context_transformer in self._context_transformers:
-            context = context_transformer(context)
-
-        if self._is_class_conditional:
-            assert context.has_class_labels() and context.class_labels().shape == (
-                x.shape[0],
-            )
-            timestep_embedding = timestep_embedding + self._label_projection(y)
+            context = context_transformer(context, device=x.device)
 
         # Initial convolution
         h = self._initial_convolution(x)
