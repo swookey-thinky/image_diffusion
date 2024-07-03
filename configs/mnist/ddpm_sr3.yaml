@@ -8,6 +8,7 @@ super_resolution:
   conditioning_key: "low_resolution_images"
 
 diffusion:
+  parameterization: "epsilon"
   # Sampling section determines the size of the sampled output
   # from the model, and defines the sampling method used
   sampling:
@@ -17,16 +18,18 @@ diffusion:
       output_spatial_size: 32
   # The noise scheduler to use with the forward diffusion process.
   noise_scheduler:
-    # The number of noise scales
-    num_scales: 1000
-    # The schedule type
-    schedule: "linear"
-    # Loss type to use for noise prediction.
-    loss_type: "l2"
-    sampler:
-      target: image_diffusion.importance_sampling.UniformSampler
-      params:
-        num_timesteps: 1000
+    target: image_diffusion.scheduler.DiscreteNoiseScheduler
+    params:
+      # The number of noise scales
+      num_scales: 1000
+      # The schedule type
+      schedule_type: "linear"
+      # Loss type to use for noise prediction.
+      loss_type: "l2"
+  importance_sampler:
+    target: image_diffusion.importance_sampling.UniformSampler
+    params:
+      num_timesteps: 1000
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context
@@ -125,8 +128,12 @@ diffusion:
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
-          target: torch.nn.Identity
-          params: {}
+          # Timestep -> timestep embedding
+          - target: image_diffusion.layers.embedding.RunProjection
+            params:
+              input_context_key: "timestep"
+              output_context_key: "timestep_embedding"
+              projection_key: "timestep"
         # The context transformer to use at each attention layer. This transforms
         # the context with a different set of parameters at each attention layer.
         context_transformer_layer:
