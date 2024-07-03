@@ -28,5 +28,5 @@ All lessons are designed to be run *in the root of the respository*, so make sur
 To train a model, you simply need a configuration file. You can find lots of examples of configuration files in the [configs](https://github.com/swookey-thinky/image_diffusion/configs) directory. For example, to train a basic DDPM-based, epsilon parameterized, unconditional diffusion model, run:
 
 ```
-> python training/mnist.py --config_path configs/mnist/ddpm_unconditional_epsilon.yaml
+> python training/mnist/train.py --config_path configs/mnist/ddpm_32x32_epsilon_discrete.yaml
 ```
