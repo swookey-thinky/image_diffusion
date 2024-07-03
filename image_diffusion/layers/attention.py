@@ -12,18 +12,9 @@ from typing import Optional, Dict
 
 from image_diffusion.layers.utils import conv_nd, zero_module, ContextBlock
 from image_diffusion.conditioning import (
-    ContextAdapter,
     NullContextAdapter,
 )
 from image_diffusion.utils import instantiate_from_config
-
-try:
-    from xformers import ops as xops
-except ImportError:
-    xops = None
-    print(
-        "Xformers is not installed correctly. If you want to use memory_efficient_attention to accelerate training use the following command to install Xformers\npip install xformers."
-    )
 
 
 class SpatialCrossAttention(ContextBlock):
@@ -187,6 +178,7 @@ class LastChannelCrossAttention(torch.nn.Module):
 
 
 class AttentionPooling(torch.nn.Module):
+    """Implements attention pooling from Imagen."""
 
     def __init__(self, num_heads, embed_dim):
         super().__init__()
@@ -241,6 +233,8 @@ class AttentionPooling(torch.nn.Module):
 
 
 class LayerNorm(torch.nn.Module):
+    """LayerNorm class which supports axis specification."""
+
     def __init__(self, feats, stable=False, dim=-1):
         super().__init__()
         self.stable = stable
@@ -260,6 +254,8 @@ class LayerNorm(torch.nn.Module):
         return (x - mean) * (var + eps).rsqrt().type(dtype) * self.g.type(dtype)
 
 
+# Helper to perform LayerNorm over the channel axis for spatial input
+# (shape = [B, C, H, W]).
 ChanLayerNorm = partial(LayerNorm, dim=-3)
 
 
@@ -268,6 +264,9 @@ class MultiHeadSelfAttention(torch.nn.Module):
 
     Based on the transformer attention in vision transformers from here:
     https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py#L58C1-L106C17
+
+    Optimized for the case where input is of shape (B, L, C), and supports
+    using built-in scaled dot product attention. Has no support for cross attention.
     """
 
     fused_attn: Final[bool]
@@ -325,85 +324,6 @@ class MultiHeadSelfAttention(torch.nn.Module):
             x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
-class WindowAttention(MultiHeadSelfAttention):
-    """Multi-head Attention block with relative position embeddings."""
-
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        qkv_bias=True,
-        use_rel_pos=False,
-        rel_pos_zero_init=True,
-        input_size=None,
-        **block_kwargs,
-    ):
-        """
-        Args:
-            dim (int): Number of input channels.
-            num_heads (int): Number of attention heads.
-            qkv_bias (bool:  If True, add a learnable bias to query, key, value.
-            rel_pos (bool): If True, add relative positional embeddings to the attention map.
-            rel_pos_zero_init (bool): If True, zero initialize relative positional parameters.
-            input_size (int or None): Input resolution for calculating the relative positional
-                parameter size.
-        """
-        super().__init__(dim, num_heads=num_heads, qkv_bias=qkv_bias, **block_kwargs)
-
-        self.use_rel_pos = use_rel_pos
-        if self.use_rel_pos:
-            # initialize relative positional embeddings
-            self.rel_pos_h = torch.nn.Parameter(
-                torch.zeros(2 * input_size[0] - 1, self.head_dim)
-            )
-            self.rel_pos_w = torch.nn.Parameter(
-                torch.zeros(2 * input_size[1] - 1, self.head_dim)
-            )
-
-            if not rel_pos_zero_init:
-                torch.nn.init.trunc_normal_(self.rel_pos_h, std=0.02)
-                torch.nn.init.trunc_normal_(self.rel_pos_w, std=0.02)
-
-    def forward(self, x, mask=None):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
-        q, k, v = qkv.unbind(2)
-
-        attn_bias = None
-        if mask is not None:
-            attn_bias = torch.zeros(
-                [B * self.num_heads, q.shape[1], k.shape[1]],
-                dtype=q.dtype,
-                device=q.device,
-            )
-            attn_bias.masked_fill_(
-                mask.squeeze(1).repeat(self.num_heads, 1, 1) == 0, float("-inf")
-            )
-
-        if xops is not None and x.device.type != "cpu":
-            x = xops.memory_efficient_attention(
-                q, k, v, p=self.attn_drop.p, attn_bias=attn_bias
-            )
-        else:
-            scale = 1.0 / q.shape[-1] ** 0.5
-            q = q * scale
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            attn = q @ k.transpose(-2, -1)
-            if attn_bias is not None:
-                attn = attn + attn_bias
-            attn = attn.softmax(-1)
-            attn = torch.nn.functional.dropout(attn, self.attn_drop.p)
-            attn = attn @ v
-            x = attn.transpose(1, 2)
-
-        x = x.reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
