@@ -12,7 +12,7 @@ diffusion:
   noise_scheduler:
     target: image_diffusion.scheduler.ContinuousNoiseScheduler
     params:
-      num_scales: 1000
+      num_scales: 1024
       logsnr_schedule: "cosine"
       loss_type: "l2"
       logsnr_min: -20
@@ -20,7 +20,7 @@ diffusion:
   importance_sampler:
     target: image_diffusion.importance_sampling.UniformSampler
     params:
-      num_timesteps: 1000
+      num_timesteps: 1024
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context
@@ -104,11 +104,13 @@ diffusion:
           timestep:
             # Defines a projection incorporating the sinusoidal position embedding.
             # Output size is (B, C, num_features * time_embedding_mult)
-            target: image_diffusion.layers.embedding.TimestepEmbeddingProjection
+            target: image_diffusion.layers.embedding.InvCosTimestepEmbeddingProjection
             params:
               num_features: 128
               time_embedding_mult: 4
               max_time: 1.0
+              clip_min: -20
+              clip_max: 20
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:

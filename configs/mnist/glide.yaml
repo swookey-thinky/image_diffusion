@@ -1,5 +1,6 @@
 # Epsilon parameterized GLIDE model, no learned sigma.
 diffusion:
+  parameterization: "epsilon"
   # Sampling section determines the size of the sampled output
   # from the model, and defines the sampling method used
   sampling:
@@ -9,16 +10,18 @@ diffusion:
       output_spatial_size: 32
   # The noise scheduler to use with the forward diffusion process.
   noise_scheduler:
-    # The number of noise scales
-    num_scales: 1000
-    # The schedule type
-    schedule: "linear"
-    # Loss type to use for noise prediction.
-    loss_type: "l2"
-    sampler:
-      target: image_diffusion.importance_sampling.UniformSampler
-      params:
-        num_timesteps: 1000
+    target: image_diffusion.scheduler.DiscreteNoiseScheduler
+    params:
+      # The number of noise scales
+      num_scales: 1000
+      # The schedule type
+      schedule_type: "linear"
+      # Loss type to use for noise prediction.
+      loss_type: "l2"
+  importance_sampler:
+    target: image_diffusion.importance_sampling.UniformSampler
+    params:
+      num_timesteps: 1000
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context
@@ -118,21 +121,27 @@ diffusion:
         # The context transformer to use at the top of the score network. This transforms
         # the context with a shared set of parameters.
         context_transformer_head:
-          target: image_diffusion.layers.transformer.GLIDETransformerWrapper
-          params:
-            # The size of the context signal coming into the layer.
-            context_dim: 128
-            # The width of the transformer attention layer. The number of channels
-            # in each attention layer is width // heads.
-            width: 128
-            # The number of transformer layers to apply.
-            layers: 6
-            # The  number of attention heads per layer.
-            heads: 1
-            # True if we should apply a layer norm before the final preojection.
-            final_layer_norm: True
-            # The final output dimensionality of the layer.
-            output_projection_dimension: 512 # num_features * 4
+          # Timestep -> timestep embedding
+          - target: image_diffusion.layers.embedding.RunProjection
+            params:
+              input_context_key: "timestep"
+              output_context_key: "timestep_embedding"
+              projection_key: "timestep"
+          - target: image_diffusion.layers.transformer.GLIDETransformerWrapper
+            params:
+              # The size of the context signal coming into the layer.
+              context_dim: 128
+              # The width of the transformer attention layer. The number of channels
+              # in each attention layer is width // heads.
+              width: 128
+              # The number of transformer layers to apply.
+              layers: 6
+              # The  number of attention heads per layer.
+              heads: 1
+              # True if we should apply a layer norm before the final preojection.
+              final_layer_norm: True
+              # The final output dimensionality of the layer.
+              output_projection_dimension: 512 # num_features * 4
         # The context transformer to use at each attention layer. This transforms
         # the context with a different set of parameters at each attention layer.
         context_transformer_layer:
