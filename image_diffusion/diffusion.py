@@ -4,6 +4,7 @@ import torch
 from typing import Callable, Dict, List, Optional, Tuple, Union
 from typing_extensions import Self
 
+from image_diffusion.samplers.base import ReverseProcessSampler
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import DotConfig
 
@@ -26,6 +27,7 @@ class DiffusionModel(torch.nn.Module):
         num_samples: int = 16,
         guidance_fn: Optional[Callable] = None,
         classifier_free_guidance: Optional[float] = None,
+        sampler: Optional[ReverseProcessSampler] = None,
     ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
         pass
 

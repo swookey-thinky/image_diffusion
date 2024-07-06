@@ -16,6 +16,7 @@ from image_diffusion.utils import cycle, load_yaml, DotConfig
 from image_diffusion.ddpm import GaussianDiffusion_DDPM
 from image_diffusion.diffusion import DiffusionModel
 from image_diffusion.cascade import GaussianDiffusionCascade
+from image_diffusion.samplers import ddim, ancestral, base
 
 OUTPUT_NAME = "output/mnist/sample"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -27,6 +28,7 @@ def sample_model(
     guidance: float,
     checkpoint_path: str,
     sampling_steps: int,
+    sampler: str,
 ):
     global OUTPUT_NAME
     OUTPUT_NAME = f"{OUTPUT_NAME}/{str(Path(config_path).stem)}"
@@ -60,18 +62,27 @@ def sample_model(
     # Move the model and the optimizer to the accelerator as well.
     diffusion_model = accelerator.prepare(diffusion_model)
 
+    if sampler == "ddim":
+        sampler = ddim.DDIMSampler()
+    elif sampler == "ancestral":
+        sampler = ancestral.AncestralSampler()
+    else:
+        raise NotImplemented(f"Sampler {sampler} not implemented.")
+
     # Save and sample the final step.
     sample(
         diffusion_model=diffusion_model,
         config=config,
         num_samples=num_samples,
         num_sampling_steps=sampling_steps,
+        sampler=sampler,
     )
 
 
 def sample(
     diffusion_model: DiffusionModel,
     config: DotConfig,
+    sampler: base.ReverseProcessSampler,
     num_samples=64,
     num_sampling_steps=1000,
 ):
@@ -90,7 +101,10 @@ def sample(
     context["classes"] = classes
 
     samples, intermediate_stage_output = diffusion_model.sample(
-        num_samples=num_samples, context=context, num_sampling_steps=num_sampling_steps
+        num_samples=num_samples,
+        context=context,
+        num_sampling_steps=num_sampling_steps,
+        sampler=sampler,
     )
 
     # Save the samples into an image grid
@@ -157,6 +171,7 @@ def main(override=None):
     parser.add_argument("--guidance", type=float, default=1.0)
     parser.add_argument("--checkpoint", type=str, default="")
     parser.add_argument("--sampling_steps", type=int, default=1000)
+    parser.add_argument("--sampler", type=str, default="ancestral")
     args = parser.parse_args()
 
     sample_model(
@@ -165,6 +180,7 @@ def main(override=None):
         guidance=args.guidance,
         checkpoint_path=args.checkpoint,
         sampling_steps=args.sampling_steps,
+        sampler=args.sampler,
     )
 
 

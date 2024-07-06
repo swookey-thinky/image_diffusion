@@ -461,6 +461,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         guidance_fn: Optional[Callable] = None,
         classifier_free_guidance: Optional[float] = None,
         num_sampling_steps: Optional[int] = None,
+        sampler: Optional[ReverseProcessSampler] = None,
     ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
         """Unconditionally/conditionally sample from the diffusion model.
 
@@ -521,6 +522,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             guidance_fn=guidance_fn,
             classifier_free_guidance=classifier_free_guidance,
             num_sampling_steps=sampling_steps,
+            sampler=sampler,
         )
         latents = latent_samples
 
@@ -674,6 +676,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         num_sampling_steps: int,
         guidance_fn=None,
         classifier_free_guidance: Optional[float] = None,
+        sampler: Optional[ReverseProcessSampler] = None,
     ):
         """Defines Algorithm 2 sampling using notation from DDPM implementation.
 
@@ -700,6 +703,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Initial image is pure noise
         x_t = torch.randn(shape, device=device)
 
+        sampler = sampler if sampler is not None else self._reverse_process_sampler
         for timestep_idx in tqdm(
             reversed(range(0, num_sampling_steps)),
             desc="sampling loop time step",
@@ -741,7 +745,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             if unconditional_context_for_timestep is not None:
                 unconditional_context_for_timestep["timestep"] = t
 
-            x_t_minus_1 = self._reverse_process_sampler.p_sample(
+            x_t_minus_1 = sampler.p_sample(
                 x_t,
                 context=context_for_timestep,
                 unconditional_context=unconditional_context_for_timestep,
