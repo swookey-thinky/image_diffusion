@@ -26,6 +26,7 @@ from image_diffusion.utils import (
 from image_diffusion.ddpm import GaussianDiffusion_DDPM
 from image_diffusion.diffusion import DiffusionModel, PredictionType
 from image_diffusion.cascade import GaussianDiffusionCascade
+from image_diffusion.samplers.ddim import DDIMSampler
 
 OUTPUT_NAME = "output/mnist/distilled"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -397,6 +398,7 @@ def sample(
         num_samples=num_samples,
         context=context,
         num_sampling_steps=num_sampling_steps,
+        sampler=DDIMSampler(),
     )
 
     # Save the samples into an image grid
