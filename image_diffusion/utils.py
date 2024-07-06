@@ -328,3 +328,23 @@ def log1mexp(x):
     return torch.where(
         x > np.log(2), torch.log1p(-torch.exp(-x)), torch.log(-torch.expm1(-x))
     )
+
+
+def dynamic_thresholding(x, p=0.995, c=1.7):
+    """
+    Dynamic thresholding, a diffusion sampling technique from Imagen (https://arxiv.org/abs/2205.11487)
+    to leverage high guidance weights and generating more photorealistic and detailed images
+    than previously was possible based on x.clamp(-1, 1) vanilla clipping or static thresholding
+
+    p — percentile determine relative value for clipping threshold for dynamic compression,
+        helps prevent oversaturation recommend values [0.96 — 0.99]
+
+    c — absolute hard clipping of value for clipping threshold for dynamic compression,
+        helps prevent undersaturation and low contrast issues; recommend values [1.5 — 2.]
+    """
+    x_shapes = x.shape
+    s = torch.quantile(x.abs().reshape(x_shapes[0], -1), p, dim=-1)
+    s = torch.clamp(s, min=1, max=c)
+    x_compressed = torch.clip(x.reshape(x_shapes[0], -1).T, -s, s) / s
+    x_compressed = x_compressed.T.reshape(x_shapes)
+    return x_compressed

@@ -16,10 +16,10 @@ diffusion:
   # Sampling section determines the size of the sampled output
   # from the model, and defines the sampling method used
   sampling:
-    target: image_diffusion.sampling.AncestralSampler
-    params:
-      output_channels: 1
-      output_spatial_size: 32
+    output_channels: 1
+    output_spatial_size: 32
+    target: image_diffusion.samplers.ancestral.AncestralSampler
+    params: {}
   # The noise scheduler to use with the forward diffusion process.
   noise_scheduler:
     target: image_diffusion.scheduler.DiscreteNoiseScheduler

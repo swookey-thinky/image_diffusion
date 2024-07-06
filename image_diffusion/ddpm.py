@@ -10,10 +10,12 @@ import numpy as np
 import torch
 from torchinfo import summary
 from tqdm import tqdm
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from typing_extensions import Self
 
 from image_diffusion.diffusion import DiffusionModel, PredictionType
+from image_diffusion.samplers.ancestral import AncestralSampler
+from image_diffusion.samplers.base import ReverseProcessSampler
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import (
     broadcast_from_left,
@@ -81,6 +83,11 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         )
         self._unconditional_context = instantiate_from_config(
             config.diffusion.classifier_free_guidance.unconditional_context.to_dict()
+        )
+
+        # Instantiate the sampler
+        self._reverse_process_sampler: ReverseProcessSampler = instantiate_from_config(
+            config.diffusion.sampling.to_dict()
         )
 
     def models(self) -> List[DiffusionModel]:
@@ -472,9 +479,9 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # The output shape of the data.
         shape = (
             num_samples,
-            self._config.diffusion.sampling.params.output_channels,
-            self._config.diffusion.sampling.params.output_spatial_size,
-            self._config.diffusion.sampling.params.output_spatial_size,
+            self._config.diffusion.sampling.output_channels,
+            self._config.diffusion.sampling.output_spatial_size,
+            self._config.diffusion.sampling.output_spatial_size,
         )
         device = next(self.parameters()).device
         self.eval()
@@ -637,167 +644,27 @@ class GaussianDiffusion_DDPM(DiffusionModel):
                 get_constant_schedule_with_warmup(optimizers[0], num_warmup_steps=0)
             ]
 
-    def _pred_epsilon(
-        self,
-        x,
-        context: Dict,
-        epsilon_v_param: Optional[List[torch.Tensor]] = None,
-    ):
-        """Predict the parameterized noise from the inputs.
-
-        Args:
-            x: The input images (or other data) at time t
-            t: The current timestep to predict
-            low_res_context: Low resolution context, for cascaded models.
-            epsilon_v_param: If not None, a tensor batch of the model output at t.
-                Used to freeze the epsilon path to prevent gradients flowing back during
-                VLB loss calculation.
-            y: Tensor batch of class labels if they exist
-            image_embeddings: Tensor batch of image embeddings
-            text_embeddngs: Tensor batch of text_embeddings
-
-        Returns:
-            Tuple of:
-                epsilon prediction, variance, log variance
-        """
-        x = self._input_preprocessor(
+    def process_input(self, x: torch.Tensor, context: Dict) -> torch.Tensor:
+        return self._input_preprocessor(
             x=x, context=context, noise_scheduler=self._noise_scheduler
         )
 
-        model_output = (
-            self._score_network(x, context=context)
-            if epsilon_v_param is None
-            else epsilon_v_param
-        )
+    def predict_score(
+        self, x: torch.Tensor, context: Dict
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        return self._score_network(x, context=context)
 
-        if self._is_learned_sigma:
-            # The v_param model calculates both the reparameterized
-            # mean and variance of the distribution.
-            epsilon_theta, v_param = model_output
+    def is_learned_sigma(self) -> bool:
+        return self._is_learned_sigma
 
-            # Calculate the learned variance from the model output.
-            # We parameterize v_param as the log of the variance.
-            log_variance = v_param
-            variance = torch.exp(log_variance)
-        else:
-            epsilon_theta = model_output
+    def noise_scheduler(self) -> NoiseScheduler:
+        return self._noise_scheduler
 
-            # The predicted variance is fixed. For an epsilon
-            # only model, we use the "fixedlarge" estimate of
-            # the variance.
-            variance, log_variance = self._noise_scheduler.variance_fixed_large(
-                context, x.shape
-            )
-        return epsilon_theta, variance, log_variance
+    def classifier_free_guidance(self) -> float:
+        return self._classifier_free_guidance
 
-    def _p_mean_variance(
-        self,
-        x,
-        context: Dict,
-        unconditional_context: Optional[Dict],
-        clip_denoised=True,
-        epsilon_v_param: Optional[List[torch.Tensor]] = None,
-        classifier_free_guidance: Optional[float] = None,
-    ):
-        """Calculates the mean and the variance of the reverse process distribution.
-
-        Applies the model to get $p(x_{t-1} | x_t)$, an estimate of the reverse
-        diffusion process.
-
-        Args:
-            x: Tensor batch of the distribution at time t.
-            t: Tensor batch of timesteps.
-            low_res_context: Low resolution context, for cascaded models.
-            clip_denoised: if True, clip the denoised signal into [-1, 1].
-            epsilon_v_param: If not None, a tensor batch of the model output at t.
-                Used to freeze the epsilon path to prevent gradients flowing back during
-                VLB loss calculation.
-            y: Tensor batch of class labels if they exist
-            classifier_free_guidance: Classifier free guidance value
-            image_embeddings: Tensor batch of image embeddings
-            text_embeddngs: Tensor batch of text_embeddings
-
-        Returns:
-            A tuple of the following values:
-                mean: Tensor batch of the reverse distribution mean.
-                variance: Tensor batch of the reverse distribution variance.
-                log_variance: Tensor batch of the log of the reverse distribution variance.
-        """
-        B, C = x.shape[:2]
-
-        assert context["timestep"].shape == (B,)
-
-        epsilon_theta, variance, log_variance = self._pred_epsilon(
-            x=x,
-            context=context,
-            epsilon_v_param=epsilon_v_param,
-        )
-
-        # If we are using classifier free guidance, then calculate the unconditional
-        # epsilon as well.
-        cfg = (
-            classifier_free_guidance
-            if classifier_free_guidance is not None
-            else self._classifier_free_guidance
-        )
-
-        if cfg >= 0.0 and unconditional_context is not None:
-            # Unconditionally sample the model
-            uncond_epsilon_theta, uncond_variance, uncond_log_variance = (
-                self._pred_epsilon(
-                    x=x,
-                    context=unconditional_context,
-                    epsilon_v_param=epsilon_v_param,
-                )
-            )
-            w = cfg
-            epsilon_theta = uncond_epsilon_theta + w * (
-                epsilon_theta - uncond_epsilon_theta
-            )
-
-            # It's not clear from the paper how to guide learned sigma models,
-            # but we will treat them the same as the epsilon-param models
-            variance = uncond_variance + w * (variance - uncond_variance)
-            log_variance = uncond_log_variance + w * (
-                log_variance - uncond_log_variance
-            )
-
-        _maybe_clip = lambda x_: (torch.clamp(x_, -1.0, 1.0) if clip_denoised else x_)
-
-        # Epsilon prediction (mean reparameterization)
-        if self._prediction_type == PredictionType.EPSILON:
-            pred_xstart = self._noise_scheduler.predict_x_from_epsilon(
-                z=x, context=context, epsilon=epsilon_theta
-            )
-        elif self._prediction_type == PredictionType.V:
-            # V-prediction, from https://arxiv.org/abs/2202.00512
-            pred_xstart = self._noise_scheduler.predict_x_from_v(
-                z=x, context=context, v=epsilon_theta
-            )
-        else:
-            raise NotImplemented(
-                f"Prediction type {self._prediction_type} is not implemented."
-            )
-
-        if (
-            "dynamic_thresholding" in self._config.diffusion
-            and self._config.diffusion.dynamic_thresholding.enable
-        ):
-            if clip_denoised:
-                pred_xstart = self._dynamic_thresholding(
-                    pred_xstart,
-                    p=self._config.diffusion.dynamic_thresholding.p,
-                    c=self._config.diffusion.dynamic_thresholding.c,
-                )
-        else:
-            pred_xstart = _maybe_clip(pred_xstart)
-
-        # Set the mean of the reverse process equal to the mean of the forward process
-        # posterior.
-        model_mean, _, _ = self._noise_scheduler.q_posterior(
-            x_start=pred_xstart, x_t=x, context=context
-        )
-        return model_mean, variance, log_variance
+    def prediction_type(self) -> PredictionType:
+        return self._prediction_type
 
     def _p_sample_loop(
         self,
@@ -849,8 +716,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
                 unconditional_context_for_timestep = None
 
             t = torch.tensor([timestep_idx] * shape[0], device=device)
+            context_for_timestep["timestep_idx"] = timestep_idx
             if self._noise_scheduler.continuous():
-                context_for_timestep["timestep_idx"] = timestep_idx
                 context_for_timestep["logsnr_s"] = self._noise_scheduler.logsnr(
                     t / num_sampling_steps
                 )
@@ -874,66 +741,17 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             if unconditional_context_for_timestep is not None:
                 unconditional_context_for_timestep["timestep"] = t
 
-            x_t_minus_1 = self._p_sample(
+            x_t_minus_1 = self._reverse_process_sampler.p_sample(
                 x_t,
                 context=context_for_timestep,
                 unconditional_context=unconditional_context_for_timestep,
+                diffusion_model=self,
                 guidance_fn=guidance_fn,
                 classifier_free_guidance=classifier_free_guidance,
             )
             x_t = x_t_minus_1
 
         return x_t
-
-    @torch.no_grad()
-    def _p_sample(
-        self,
-        x,
-        context: Dict,
-        unconditional_context: Optional[Dict],
-        guidance_fn=None,
-        classifier_free_guidance: Optional[float] = None,
-    ):
-        """Reverse process single step.
-
-        Samples x_{t-1} given x_t - the joint distribution p_theta(x_{t-1}|x_t).
-
-        Args:
-            x: Tensor batch of the distribution at time t.
-            t: Tensor batch of the current timestep.
-            low_res_context: Low resolution context, for cascaded models.
-            y: Tensor batch of class labels if they exist
-            guidance_fn: Optional guidance function using the gradients of a classifier
-                to guide diffusion.
-            classifier_free_guidance: Classifier free guidance value
-            image_embeddings: Tensor batch of image embeddings
-            text_embeddngs: Tensor batch of text_embeddings
-
-        Returns:
-            Tensor batch of the distribution at timestep t-1.
-        """
-        model_mean, model_variance, model_log_variance = self._p_mean_variance(
-            x=x,
-            context=context,
-            unconditional_context=unconditional_context,
-            clip_denoised=True,
-            classifier_free_guidance=classifier_free_guidance,
-        )
-
-        # No noise if t = 0
-        t = context["timestep"]
-        noise = torch.randn_like(x)
-        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
-
-        if guidance_fn is not None:
-            model_mean = self._guidance_mean(
-                guidance_fn, model_mean, model_variance, x, t, context["classes"]
-            )
-
-        pred_img = (
-            model_mean + nonzero_mask * torch.exp(0.5 * model_log_variance) * noise
-        )
-        return pred_img
 
     def _vb_bits_per_dim(
         self, x_0, x_t, context: Dict, epsilon_v_param, clip_denoised: bool
@@ -965,11 +783,12 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         )
 
         # When calculating the variational lower bound, we disable
-        # classifier free guidance. Not sure what the expected
-        # behavior should be though, since this is during training not inference.
-        mean, _, log_variance = self._p_mean_variance(
+        # classifier free guidance.
+        ancestral_sampler = AncestralSampler()
+        mean, _, log_variance = ancestral_sampler.p_mean_variance(
             x_t,
             context=context,
+            diffusion_model=self,
             unconditional_context=None,
             clip_denoised=clip_denoised,
             epsilon_v_param=epsilon_v_param,
@@ -992,48 +811,3 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # otherwise return KL(q(x_{t-1}|x_t,x_0) || p(x_{t-1}|x_t))
         output = torch.where((context["timestep"] == 0), decoder_nll, kl)
         return output
-
-    def _guidance_mean(self, guidance_fn, p_mean, p_var, x, t, y):
-        """Classifier guidance for the mean estimate.
-
-        Compute the mean for the previous step, given a function guidance_fn that
-        computes the gradient of a conditional log probability with respect to
-        x. In particular, guidance_fn computes grad(log(p(y|x))), and we want to
-        condition on y.
-
-        This uses the conditioning strategy from Sohl-Dickstein et al. (2015).
-
-        Args:
-            guidance_fn: Computes the gradient of a conditional log probability with
-                respect to x
-            p_mean: The predicted mean of the distribution
-            p_var: The predicted variance of the distribution
-            x: Distribution at x
-            t: Timestep
-            y: Class labels
-
-        Returns:
-            The mean of the distribution guided by the gradient.
-        """
-        gradient = guidance_fn(x, t, y)
-        new_mean = p_mean.float() + p_var * gradient.float()
-        return new_mean
-
-    def _dynamic_thresholding(self, x, p=0.995, c=1.7):
-        """
-        Dynamic thresholding, a diffusion sampling technique from Imagen (https://arxiv.org/abs/2205.11487)
-        to leverage high guidance weights and generating more photorealistic and detailed images
-        than previously was possible based on x.clamp(-1, 1) vanilla clipping or static thresholding
-
-        p — percentile determine relative value for clipping threshold for dynamic compression,
-            helps prevent oversaturation recommend values [0.96 — 0.99]
-
-        c — absolute hard clipping of value for clipping threshold for dynamic compression,
-            helps prevent undersaturation and low contrast issues; recommend values [1.5 — 2.]
-        """
-        x_shapes = x.shape
-        s = torch.quantile(x.abs().reshape(x_shapes[0], -1), p, dim=-1)
-        s = torch.clamp(s, min=1, max=c)
-        x_compressed = torch.clip(x.reshape(x_shapes[0], -1).T, -s, s) / s
-        x_compressed = x_compressed.T.reshape(x_shapes)
-        return x_compressed
