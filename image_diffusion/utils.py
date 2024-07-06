@@ -185,6 +185,13 @@ def freeze(model: T) -> T:
     return model
 
 
+def unfreeze(model: T) -> T:
+    """Unfreeze the parameters of a model."""
+    for param in model.parameters():
+        param.requires_grad = True
+    return model
+
+
 def instantiate_from_config(config, use_config_struct: bool = False) -> Any:
     if not "target" in config:
         if config == "__is_first_stage__":

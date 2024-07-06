@@ -20,7 +20,7 @@ from image_diffusion.utils import (
     cycle,
     freeze,
     load_yaml,
-    normalize_to_neg_one_to_one,
+    unfreeze,
     DotConfig,
 )
 from image_diffusion.ddpm import GaussianDiffusion_DDPM
@@ -72,6 +72,7 @@ def distill(
     for iteration_idx in range(distillation_iterations):
         # Initialize the student from the teacher
         student_diffusion_model.load_state_dict(teacher_diffusion_model.state_dict())
+
         print(f"Distilling model into {N} sampling steps...")
         single_distillation_iteration(
             batch_size=batch_size,
@@ -209,6 +210,9 @@ def single_distillation_iteration(
 
     # Freeze the teacher model
     teacher_diffusion_model = freeze(teacher_diffusion_model)
+    student_diffusion_model = unfreeze(student_diffusion_model)
+    teacher_diffusion_model.eval()
+    student_diffusion_model.train()
 
     with tqdm(initial=step, total=num_training_steps_per_iteration) as progress_bar:
         # Perform gradient descent for the given number of training steps.
