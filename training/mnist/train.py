@@ -247,7 +247,7 @@ def train(
                     sample_with_guidance=sample_with_guidance,
                     validation_dataloader=validation_dataloader,
                 )
-                save(diffusion_model, step, loss, optimizers)
+                save(diffusion_model, step, loss, optimizers, config)
                 average_loss = average_loss_cumulative / float(save_and_sample_every_n)
                 average_loss_cumulative = 0.0
 
@@ -266,7 +266,7 @@ def train(
         sample_with_guidance=sample_with_guidance,
         validation_dataloader=validation_dataloader,
     )
-    save(diffusion_model, step, loss, optimizers)
+    save(diffusion_model, step, loss, optimizers, config)
 
 
 def sample(
@@ -373,7 +373,13 @@ def sample(
         )
 
 
-def save(diffusion_model, step, loss, optimizers: List[torch.optim.Optimizer]):
+def save(
+    diffusion_model,
+    step,
+    loss,
+    optimizers: List[torch.optim.Optimizer],
+    config: DotConfig,
+):
     # Save a corresponding model checkpoint.
     torch.save(
         {
@@ -384,6 +390,7 @@ def save(diffusion_model, step, loss, optimizers: List[torch.optim.Optimizer]):
                 optimizer.state_dict() for optimizer in optimizers
             ],
             "loss": loss,
+            "config": config.to_dict(),
         },
         f"{OUTPUT_NAME}/diffusion-{step}.pt",
     )
