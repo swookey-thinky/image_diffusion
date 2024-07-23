@@ -19,10 +19,10 @@ diffusion:
       schedule_type: "linear"
       # Loss type to use for noise prediction.
       loss_type: "l2"
-  importance_sampler:
-    target: image_diffusion.importance_sampling.UniformSampler
-    params:
-      num_timesteps: 1000
+      importance_sampler:
+        target: image_diffusion.importance_sampling.UniformSampler
+        params:
+          num_timesteps: 1000
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context

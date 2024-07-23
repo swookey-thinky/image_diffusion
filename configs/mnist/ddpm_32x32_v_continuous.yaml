@@ -17,10 +17,10 @@ diffusion:
       loss_type: "l2"
       logsnr_min: -20
       logsnr_max: 20
-  importance_sampler:
-    target: image_diffusion.importance_sampling.UniformSampler
-    params:
-      num_timesteps: 1024
+      importance_sampler:
+        target: image_diffusion.importance_sampling.UniformSampler
+        params:
+          num_timesteps: 1024
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context

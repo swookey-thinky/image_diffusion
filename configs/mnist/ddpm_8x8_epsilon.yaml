@@ -6,7 +6,7 @@ diffusion:
   # from the model, and defines the sampling method used
   sampling:
     output_channels: 1
-    output_spatial_size: 32
+    output_spatial_size: 8
     target: image_diffusion.samplers.ancestral.AncestralSampler
     params: {}
   # The noise scheduler to use with the forward diffusion process.
@@ -19,10 +19,10 @@ diffusion:
       schedule_type: "linear"
       # Loss type to use for noise prediction.
       loss_type: "l2"
-  importance_sampler:
-    target: image_diffusion.importance_sampling.UniformSampler
-    params:
-      num_timesteps: 1000
+      importance_sampler:
+        target: image_diffusion.importance_sampling.UniformSampler
+        params:
+          num_timesteps: 1000
   # A preprocessor to use with the context before sending to the score network.
   context_preprocessing:
       # The Prompts Preprocessor converts the list of text prompts in the context
