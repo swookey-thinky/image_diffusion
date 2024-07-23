@@ -7,11 +7,13 @@ from typing_extensions import Self
 from image_diffusion.samplers.base import ReverseProcessSampler
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import DotConfig
+from image_diffusion.sde import SDE
 
 
 class PredictionType(Enum):
     EPSILON = "epsilon"
     V = "v"
+    RECTIFIED_FLOW = "rectified_flow"
 
 
 class DiffusionModel(torch.nn.Module):
@@ -81,4 +83,9 @@ class DiffusionModel(torch.nn.Module):
 
     @abstractmethod
     def prediction_type(self) -> PredictionType:
+        pass
+
+    @abstractmethod
+    def sde(self) -> Optional[SDE]:
+        """Gets the SDE associated with this diffusion model, if it exists."""
         pass

@@ -7,9 +7,14 @@ across diffusion model implementations.
 from abc import abstractmethod
 import numpy as np
 import torch
-from typing import Tuple
+from typing import Dict, Tuple
 
-from image_diffusion.utils import extract, broadcast_from_left, log1mexp
+from image_diffusion.utils import (
+    extract,
+    broadcast_from_left,
+    log1mexp,
+    instantiate_from_config,
+)
 
 
 def cosine_logsnr_schedule(num_scales, logsnr_min, logsnr_max):
@@ -62,7 +67,9 @@ def sigmoid_beta_schedule(timesteps, min_beta, max_beta):
 
 class NoiseScheduler(torch.nn.Module):
     @abstractmethod
-    def sample_random_times(self, batch_size) -> torch.Tensor:
+    def sample_random_times(
+        self, batch_size, device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         pass
 
     @abstractmethod
@@ -103,6 +110,18 @@ class NoiseScheduler(torch.nn.Module):
     def steps(self) -> int:
         pass
 
+    @abstractmethod
+    def update_with_all_losses(self, ts, losses):
+        """Update the reweighting using losses from a model.
+
+        Sub-classes should override this method to update the reweighting
+        using losses from the model.
+
+        Args:
+            ts: Tensor batch of int timesteps.
+            losses: Tensor batch of float losses, one per timestep.
+        """
+
 
 class DiscreteNoiseScheduler(NoiseScheduler):
     """Base forward process helper class."""
@@ -114,6 +133,7 @@ class DiscreteNoiseScheduler(NoiseScheduler):
         loss_type: str,
         min_beta: float = 0.0001,
         max_beta: float = 0.02,
+        importance_sampler: Dict = {},
         **kwargs,
     ):
         super().__init__()
@@ -134,6 +154,7 @@ class DiscreteNoiseScheduler(NoiseScheduler):
                 f"Noise schedule {schedule_type} not implemented."
             )
 
+        self._importance_sampler = instantiate_from_config(importance_sampler)
         alphas = 1.0 - betas
         alphas_cumprod = torch.cumprod(alphas, axis=0)
         alphas_cumprod_prev = torch.nn.functional.pad(
@@ -207,15 +228,11 @@ class DiscreteNoiseScheduler(NoiseScheduler):
     def continuous(self) -> bool:
         return False
 
-    def sample_random_times(self, batch_size) -> torch.Tensor:
+    def sample_random_times(
+        self, batch_size, device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Samples random times for the forward diffusion process."""
-        return torch.randint(
-            0,
-            self.num_timesteps,
-            (batch_size,),
-            device=self.betas.device,
-            dtype=torch.long,
-        )
+        return self._importance_sampler.sample(batch_size=batch_size, device=device)
 
     def variance_fixed_large(self, context, shape) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculates the "fixedlarge" variance from DDPM."""
@@ -318,6 +335,18 @@ class DiscreteNoiseScheduler(NoiseScheduler):
         sigma_t = extract(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
         return (z - alpha_t * x) / sigma_t
 
+    def update_with_all_losses(self, ts, losses):
+        """Update the reweighting using losses from a model.
+
+        Sub-classes should override this method to update the reweighting
+        using losses from the model.
+
+        Args:
+            ts: Tensor batch of int timesteps.
+            losses: Tensor batch of float losses, one per timestep.
+        """
+        self._importance_sampler.update_with_all_losses(ts, losses)
+
 
 class ContinuousNoiseScheduler(NoiseScheduler):
     """Base forward process helper class."""
@@ -374,12 +403,13 @@ class ContinuousNoiseScheduler(NoiseScheduler):
     def continuous(self) -> bool:
         return True
 
-    def sample_random_times(self, batch_size) -> torch.Tensor:
+    def sample_random_times(
+        self, batch_size, device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Samples random times for the forward diffusion process."""
-        t = torch.rand(
-            size=(batch_size,), dtype=torch.float32, device=self.gammas.device
-        )
-        return t
+        t = torch.rand(size=(batch_size,), dtype=torch.float32, device=device)
+        weights = torch.ones_like(t)
+        return t, weights
 
     def variance_fixed_large(self, context, shape) -> Tuple[torch.Tensor, torch.Tensor]:
         """Calculates the "fixedlarge" variance from DDPM."""
@@ -525,3 +555,79 @@ class ContinuousNoiseScheduler(NoiseScheduler):
         return torch.sqrt(1.0 + torch.exp(logsnr_t)) * (
             z - x * torch.rsqrt(1.0 + torch.exp(-logsnr_t))
         )
+
+    def update_with_all_losses(self, ts, losses):
+        """Update the reweighting using losses from a model.
+
+        Sub-classes should override this method to update the reweighting
+        using losses from the model.
+
+        Args:
+            ts: Tensor batch of int timesteps.
+            losses: Tensor batch of float losses, one per timestep.
+        """
+        return
+
+
+class DiscreteRectifiedFlowNoiseScheduler(torch.nn.Module):
+    def __init__(self, steps: int, max_time: float, **kwargs):
+        super().__init__()
+        self._epsilon = 1e-3
+        self._max_time = max_time
+        self._steps = steps
+
+    def sample_random_times(
+        self, batch_size, device
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Rectified flow time is in the range (eps, 1.0 - eps)
+        t = (
+            torch.rand(batch_size, device=device) * (self._max_time - self._epsilon)
+            + self._epsilon
+        )
+        return t, torch.ones_like(t)
+
+    def continuous(self) -> bool:
+        return False
+
+    def variance_fixed_large(self, context, shape) -> Tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplemented()
+
+    def q_posterior(
+        self, x_start, x_t, context
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        raise NotImplemented()
+
+    def q_sample(self, x_start, t, noise=None) -> torch.Tensor:
+        assert noise is not None
+
+        # t=1.0 should be noise, t=0.0 should be x_start.
+        t_expanded = broadcast_from_left(t, shape=x_start.shape)
+        perturbed_data = t_expanded * x_start + (1.0 - t_expanded) * noise
+        return perturbed_data
+
+    def predict_x_from_epsilon(self, z, epsilon, context) -> torch.Tensor:
+        raise NotImplemented()
+
+    def predict_x_from_v(self, z, v, context) -> torch.Tensor:
+        raise NotImplemented()
+
+    def predict_v_from_x_and_epsilon(self, x, epsilon, t) -> torch.Tensor:
+        raise NotImplemented()
+
+    def predict_epsilon_from_x(self, z, x, context) -> torch.Tensor:
+        raise NotImplemented()
+
+    def steps(self) -> int:
+        return self._steps
+
+    def update_with_all_losses(self, ts, losses):
+        """Update the reweighting using losses from a model.
+
+        Sub-classes should override this method to update the reweighting
+        using losses from the model.
+
+        Args:
+            ts: Tensor batch of int timesteps.
+            losses: Tensor batch of float losses, one per timestep.
+        """
+        return

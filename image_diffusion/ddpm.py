@@ -16,6 +16,7 @@ from typing_extensions import Self
 from image_diffusion.diffusion import DiffusionModel, PredictionType
 from image_diffusion.samplers.ancestral import AncestralSampler
 from image_diffusion.samplers.base import ReverseProcessSampler
+from image_diffusion.sde import SDE
 from image_diffusion.scheduler import NoiseScheduler
 from image_diffusion.utils import (
     broadcast_from_left,
@@ -47,9 +48,11 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             self._prediction_type = PredictionType.EPSILON
         elif config.diffusion.parameterization == "v":
             self._prediction_type = PredictionType.V
+        elif config.diffusion.parameterization == "rectified_flow":
+            self._prediction_type = PredictionType.RECTIFIED_FLOW
         else:
             raise NotImplemented(
-                f"Parameterization {config.difusion.parameterization} not implemented."
+                f"Parameterization {config.diffusion.parameterization} not implemented."
             )
 
         self._score_network = instantiate_from_config(
@@ -70,9 +73,6 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         self._noise_scheduler: NoiseScheduler = instantiate_from_config(
             config.diffusion.noise_scheduler.to_dict()
         )
-        self._importance_sampler = instantiate_from_config(
-            config.diffusion.importance_sampler.to_dict()
-        )
 
         # TODO: Add the full list
         self._context_preprocessor = instantiate_from_config(
@@ -90,8 +90,18 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             config.diffusion.sampling.to_dict()
         )
 
+        # Get the SDE associated with this diffusion model, if it exists.
+        if "sde" in config.diffusion.to_dict():
+            self._sde = instantiate_from_config(config.diffusion.sde.to_dict())
+        else:
+            self._sde = None
+
     def models(self) -> List[DiffusionModel]:
         return [self]
+
+    def sde(self) -> Optional[SDE]:
+        """Gets the SDE associated with this diffusion model, if it exists."""
+        return self._sde
 
     def config(self) -> DotConfig:
         return self._config
@@ -126,15 +136,12 @@ class GaussianDiffusion_DDPM(DiffusionModel):
 
         # Line 3, calculate the random timesteps for the training batch.
         # Use importance sampling here if desired.
+        t, weights = self._noise_scheduler.sample_random_times(
+            batch_size=B, device=device
+        )
         if self._noise_scheduler.continuous():
-            # TODO: Update importance sampling for continuous timesteps
-            t = self._noise_scheduler.sample_random_times(batch_size=B)
-            weights = torch.ones_like(t)
-
             # Add the logsnr to the context if we are continuous
             context["logsnr_t"] = self._noise_scheduler.logsnr(t)
-        else:
-            t, weights = self._importance_sampler.sample(batch_size=B, device=device)
         context["timestep"] = t
 
         # Line 4, sample from a Gaussian with mean 0 and unit variance.
@@ -209,6 +216,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             prediction_target = self._noise_scheduler.predict_v_from_x_and_epsilon(
                 x=x_0, epsilon=epsilon, t=t
             )
+        elif self._prediction_type == PredictionType.RECTIFIED_FLOW:
+            prediction_target = x_0 - epsilon
         else:
             raise NotImplemented(
                 f"Prediction type {self._prediction_type} not implemented."
@@ -241,7 +250,7 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             vb_loss *= lamb
         total_loss = mse_loss + vb_loss
 
-        self._importance_sampler.update_with_all_losses(t, total_loss.detach())
+        self._noise_scheduler.update_with_all_losses(t, total_loss.detach())
         total_loss = total_loss * weights
 
         return {
