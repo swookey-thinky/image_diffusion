@@ -113,8 +113,11 @@ class AncestralSampler(ReverseProcessSampler):
             # The predicted variance is fixed. For an epsilon
             # only model, we use the "fixedlarge" estimate of
             # the variance.
-            variance, log_variance = (
-                diffusion_model.noise_scheduler().variance_fixed_large(context, x.shape)
+            (
+                variance,
+                log_variance,
+            ) = diffusion_model.noise_scheduler().variance_fixed_large(
+                context, model_output.shape
             )
         return epsilon_theta, variance, log_variance
 

@@ -6,7 +6,7 @@ diffusion:
   # from the model, and defines the sampling method used
   sampling:
     output_channels: 1
-    output_spatial_size: 32
+    output_spatial_size: 8
     target: image_diffusion.samplers.ancestral.AncestralSampler
     params: {}
   # The noise scheduler to use with the forward diffusion process.
