@@ -74,9 +74,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             config.diffusion.noise_scheduler.to_dict()
         )
 
-        # TODO: Add the full list
-        self._context_preprocessor = instantiate_from_config(
-            config.diffusion.context_preprocessing[0]
+        self._context_preprocessors = torch.nn.ModuleList(
+            [instantiate_from_config(c) for c in config.diffusion.context_preprocessing]
         )
         self._input_preprocessor = instantiate_from_config(
             config.diffusion.input_preprocessing.to_dict()
@@ -189,7 +188,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Preprocess any of the context before it hits the score network.
         # For example, if we have prompts, then convert them
         # into text tokens or text embeddings.
-        context = self._context_preprocessor(context, device)
+        for preprocessor in self._context_preprocessors:
+            context = preprocessor(context, device)
 
         # Process the input
         x_t = self._input_preprocessor(
@@ -351,7 +351,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Preprocess any of the context before it hits the score network.
         # For example, if we have prompts, then convert them
         # into text tokens or text embeddings.
-        context = self._context_preprocessor(context, device)
+        for preprocessor in self._context_preprocessors:
+            context = preprocessor(context, device)
 
         # Process the input
         z_t = self._noise_scheduler.q_sample(x_start=x_0, t=t, noise=epsilon)
@@ -499,9 +500,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Generate the unconditional context for classifier free guidance
         if classifier_free_guidance is not None:
             unconditional_context = self._unconditional_context(context)
-            unconditional_context = self._context_preprocessor(
-                unconditional_context, device
-            )
+            for preprocessor in self._context_preprocessors:
+                unconditional_context = preprocessor(unconditional_context, device)
         else:
             unconditional_context = None
 
@@ -516,7 +516,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
         # Preprocess any of the context before it hits the score network.
         # For example, if we have prompts, then convert them
         # into text tokens or text embeddings.
-        context = self._context_preprocessor(context, device)
+        for preprocessor in self._context_preprocessors:
+            context = preprocessor(context, device)
 
         sampling_steps = (
             num_sampling_steps
@@ -593,7 +594,8 @@ class GaussianDiffusion_DDPM(DiffusionModel):
             )
 
         # Preprocess the context
-        summary_context = self._context_preprocessor(summary_context, device="cpu")
+        for preprocessor in self._context_preprocessors:
+            summary_context = preprocessor(summary_context, device="cpu")
 
         # Monkey path torch summary to deal with str inputs from text prompts
         fix_torchinfo_for_str()
