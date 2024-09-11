@@ -3,6 +3,8 @@
 [![python](https://img.shields.io/badge/Python-3.9-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org)
 [![pytorch](https://img.shields.io/badge/PyTorch-2.0.0-EE4C2C.svg?style=flat&logo=pytorch)](https://pytorch.org)
 
+## DEPRECATED: See https://github.com/swookey-thinky/xdiffusion for a unified (image, video, audio) diffusion repository
+
 Small image diffusion implementation using latest research papers. Built for testing on small datasets, but extensible to large datasets given enough GPU.
 
 This repository takes all of the learnings from the lessons at [Zero-to-Hero - Image Diffusion](https://github.com/swookey-thinky/mindiffusion/) and builds a single implementation to support them. This was born out of the realization that all of the image diffusion research is built upon the same fundamentals, and so in order to play out with those fundamentals and pieces, it was necessary to create a single repository to make it wasy to do so. This also makes the lessons above easier to implement since we can configure everything via YAML files.
